@@ -935,7 +935,10 @@ export class Agent {
           {
             messages,
             tools: ALL_TOOLS.map((t) => t.definition),
-            stream: true,
+            // Respect the configured transport mode. Some OpenAI-compatible
+            // providers return empty streamed tool deltas while non-streaming
+            // responses contain valid tool calls.
+            stream: this.options.config.model.stream ?? true,
             signal,
           },
           this.onStreamChunk.bind(this)
