@@ -3,6 +3,20 @@ import assert from 'node:assert/strict';
 import { pruneMessageHistory, limitMessageHistory, Agent } from './agent.js';
 import type { Message } from './types.js';
 
+test('Agent.run forwards configured non-streaming mode to the provider', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(), quiet: true, autoApprove: true,
+    config: { model: { provider: 'openai-compatible', baseUrl: 'http://test.api/v1', model: 'test', stream: false } },
+  });
+  const calls: boolean[] = [];
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async (options) => {
+    calls.push(options.stream === true);
+    return { content: 'done' };
+  });
+  await agent.run('test');
+  assert.deepEqual(calls, [false]);
+});
+
 test('pruneMessageHistory keeps recent tool messages fully intact and truncates old ones', () => {
   const messages: Message[] = [
     { role: 'system', content: 'system prompt' },
