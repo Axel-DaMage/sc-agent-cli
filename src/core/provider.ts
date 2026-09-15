@@ -153,9 +153,6 @@ export class OpenAICompatibleProvider {
         const responseDuration = Date.now() - requestStart;
         this.lastApiCallTime = Date.now();
 
-        clearTimeout(timeoutTimer);
-        if (onAbort && options.signal) options.signal.removeEventListener('abort', onAbort);
-
         verboseApiResponse(response.status, responseDuration);
 
         if (!response.ok) {
@@ -171,9 +168,9 @@ export class OpenAICompatibleProvider {
         }
 
         if (options.stream && response.body) {
-          return this.handleStreamResponse(response.body, onChunk);
+          return await this.handleStreamResponse(response.body, onChunk);
         } else {
-          return this.handleNonStreamResponse(response);
+          return await this.handleNonStreamResponse(response);
         }
       } catch (err: unknown) {
         clearTimeout(timeoutTimer);
@@ -188,6 +185,10 @@ export class OpenAICompatibleProvider {
         } else {
           throw err;
         }
+      } finally {
+        // fetch resolves at headers; retain cancellation through body reads.
+        clearTimeout(timeoutTimer);
+        if (onAbort && options.signal) options.signal.removeEventListener('abort', onAbort);
       }
     }
 
