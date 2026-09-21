@@ -59,6 +59,7 @@ export interface ProjectConfig {
   permissions?: {
     autoApprove?: string[]; // glob patterns for auto-approved tools
     denyPaths?: string[]; // paths to never access
+    denyCommands?: string[]; // shell command patterns to never execute (hard block)
     profile?: PermissionProfile; // Permission behavior profile
   };
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
