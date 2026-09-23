@@ -22,7 +22,44 @@ export function clearSessionPermissions(): void {
   sessionAutoApprove.clear();
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Match a shell command against permissions.denyCommands patterns.
+// Pattern semantics (case-sensitive, whitespace-normalized):
+//   - contains '*': full-command glob, '*' matches any character sequence
+//   - otherwise:    substring match anywhere in the command
+// Returns the matching pattern, or null when the command is allowed.
+export function matchDenyCommand(command: string, patterns: string[]): string | null {
+  const normalized = command.trim().replace(/\s+/g, ' ');
+  for (const raw of patterns) {
+    const pattern = (raw || '').trim().replace(/\s+/g, ' ');
+    if (!pattern) continue;
+    if (pattern.includes('*')) {
+      const re = new RegExp('^' + pattern.split('*').map(escapeRegExp).join('.*') + '$');
+      if (re.test(normalized)) return raw;
+    } else if (normalized.includes(pattern)) {
+      return raw;
+    }
+  }
+  return null;
+}
+
 export async function requestPermission(ctx: PermissionContext): Promise<boolean> {
+  // Hard deny first: permissions.denyCommands is a non-interactive blocklist
+  // that applies to run_shell in every mode — including -y/autoApprove.
+  if (ctx.toolName === 'run_shell') {
+    const command = (ctx.args.command as string) || '';
+    const denied = matchDenyCommand(command, ctx.config.permissions?.denyCommands || []);
+    if (denied) {
+      throw new Error(
+        `Command denied by permissions.denyCommands rule "${denied}": ${command}\n` +
+        `This is a hard block — adjust the deny list in your config to allow it.`
+      );
+    }
+  }
+
   // Auto-approve if explicitly set in context
   if (ctx.autoApprove) return true;
 

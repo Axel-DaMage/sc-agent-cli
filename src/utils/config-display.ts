@@ -88,6 +88,7 @@ export async function showConfig(
     config.permissions?.profile === 'blacklist' ? chalk.cyan : chalk.gray);
   list('Auto-approved', config.permissions?.autoApprove || []);
   list('Denied paths', config.permissions?.denyPaths || []);
+  list('Denied commands', config.permissions?.denyCommands || []);
 
   // ── Tools ──
   section('Tools (10)');

