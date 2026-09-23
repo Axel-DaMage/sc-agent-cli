@@ -1066,8 +1066,26 @@ export class Agent {
             };
           }
 
+          let args: Record<string, unknown>;
           try {
-            const args = JSON.parse(toolCall.function.arguments);
+            args = JSON.parse(toolCall.function.arguments);
+          } catch {
+            // Malformed tool arguments from the model (truncated stream, bad
+            // escaping) — return a tool error result so the model can retry,
+            // instead of letting Promise.all reject and crash the run (#406).
+            const parseError = `Invalid tool arguments JSON for ${toolName}: ${String(toolCall.function.arguments || '').slice(0, 200)}`;
+            this.emitToolError(toolName, parseError);
+            this.log(chalk.gray(`  │ ${chalk.red('✗')} ${toolName}: ${parseError}`));
+            toolsUsed.push({name: toolName, success: false, error: parseError});
+            return {
+              role: 'tool' as const,
+              content: `Error: ${parseError}`,
+              tool_call_id: toolCall.id,
+              name: toolName,
+            };
+          }
+
+          try {
             const toolStartTime = Date.now();
 
             verboseToolCall(toolName, args);
@@ -1104,7 +1122,7 @@ export class Agent {
             this.emitToolError(toolName, errorMsg);
 
             this.log(chalk.gray(`  │ ${errorIcon} ${toolName} failed: ${errorMsg}`));
-            toolsUsed.push({name: toolName, success: false, error: errorMsg, args: JSON.parse(toolCall.function.arguments)});
+            toolsUsed.push({name: toolName, success: false, error: errorMsg, args});
 
             // Enrich error with contextual analysis so the LLM can respond intelligently
             const enhanced = enhanceError(toolName, errorMsg, this.shellInfo.type);

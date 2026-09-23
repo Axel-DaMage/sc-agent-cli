@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 🐛 Fixed
+
+- **Malformed tool-call arguments no longer crash the agent run:** `JSON.parse(toolCall.function.arguments)` was evaluated once inside `try` and again inside `catch`, so a model emitting invalid JSON (truncated stream, bad escaping — common with smaller/local models) made the rejection escape through `Promise.all` and kill the entire run. Arguments are now parsed once up front; malformed JSON returns a normal tool-error result so the model can self-correct. In headless runs (`sc chat -yq`) a single bad tool call previously meant full-run failure with zero changes produced. (Fixes #406)
+
 ## [0.3.1] - 2026-06-28
 
 ### 🐛 Fixed
