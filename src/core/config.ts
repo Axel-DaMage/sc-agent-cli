@@ -50,7 +50,9 @@ const DEFAULT_CONFIG: ProjectConfig = {
       maxTokens: 1024,
     },
   },
-  activeProfile: 'ollama',
+  // No default activeProfile: model.* above already holds the Ollama
+  // defaults, and an implicit profile would silently override any
+  // user-configured model.baseUrl/model (see #398).
 };
 
 const API_KEY_REQUIREMENTS = [
