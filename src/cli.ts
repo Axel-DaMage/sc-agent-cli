@@ -203,6 +203,13 @@ program
         permMode = options.permissions as 'ask_once' | 'always_ask' | 'unlimited';
       }
 
+      // External tool plugins (#400): load before session so tools appear
+      // in the schema. Warn-and-skip on failure — never crash the CLI.
+      if (Array.isArray(config.plugins) && config.plugins.length > 0) {
+        const { loadPluginTools } = await import('./tools/plugin-loader.js');
+        const { registerPluginTools } = await import('./tools/registry.js');
+        registerPluginTools(await loadPluginTools(config.plugins, process.cwd()));
+      }
       const outputFormat = options.outputFormat ?? 'text';
       if (outputFormat !== 'text' && outputFormat !== 'json') {
         console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
