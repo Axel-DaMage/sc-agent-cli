@@ -30,6 +30,91 @@ function statusLabel(status: CheckResult['status']): string {
   return chalk.red('FAIL');
 }
 
+const PROBE_TIMEOUT_MS = 8000;
+
+function probeHeaders(config: ProjectConfig): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (config.model.apiKey) headers['Authorization'] = `Bearer ${config.model.apiKey}`;
+  return headers;
+}
+
+async function probeChatCompletions(baseUrl: string, config: ProjectConfig): Promise<Response> {
+  return fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { ...probeHeaders(config), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: config.model.model,
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 1,
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+  });
+}
+
+export async function probeProviderEndpoint(config: ProjectConfig): Promise<CheckResult> {
+  const baseUrl = config.model.baseUrl.replace(/\/+$/, '');
+  const modelsUrl = `${baseUrl}/models`;
+  let res: Response;
+  try {
+    res = await fetch(modelsUrl, { headers: probeHeaders(config), signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+  } catch (err) {
+    return {
+      name: 'provider endpoint',
+      status: 'FAIL',
+      detail: `${modelsUrl} unreachable: ${err instanceof Error ? err.message : err}`,
+      fix: 'Check baseUrl, network connectivity, and that the provider is running.',
+    };
+  }
+  if (res.ok) {
+    return { name: 'provider endpoint', status: 'PASS', detail: `${modelsUrl} → ${res.status}` };
+  }
+  if (res.status !== 401 && res.status !== 403) {
+    return {
+      name: 'provider endpoint',
+      status: 'WARN',
+      detail: `${modelsUrl} → ${res.status} (reachable, but /models did not return 2xx)`,
+    };
+  }
+  // /models rejected auth — distinguish a bad key from an admin-protected
+  // /models on an inference-capable gateway by probing a real completion.
+  try {
+    const probe = await probeChatCompletions(baseUrl, config);
+    if (probe.ok) {
+      return {
+        name: 'provider endpoint',
+        status: 'PASS',
+        detail: `${modelsUrl} → ${res.status} (admin-protected) but /chat/completions accepted auth → inference OK`,
+      };
+    }
+    if (probe.status === 401 || probe.status === 403) {
+      return config.model.apiKey
+        ? {
+            name: 'provider endpoint',
+            status: 'FAIL',
+            detail: `auth rejected (/models → ${res.status}, /chat/completions → ${probe.status})`,
+            fix: 'Verify the API key is valid for this provider.',
+          }
+        : {
+            name: 'provider endpoint',
+            status: 'WARN',
+            detail: `${modelsUrl} → ${res.status}; /chat/completions → ${probe.status} — endpoint requires auth but no apiKey is configured`,
+          };
+    }
+    return {
+      name: 'provider endpoint',
+      status: 'WARN',
+      detail: `${modelsUrl} → ${res.status}; /chat/completions probe → ${probe.status} (inconclusive)`,
+    };
+  } catch (err) {
+    return {
+      name: 'provider endpoint',
+      status: 'WARN',
+      detail: `${modelsUrl} → ${res.status} (auth rejected); /chat/completions probe failed: ${err instanceof Error ? err.message : err}`,
+    };
+  }
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<void> {
   const results: CheckResult[] = [];
   const globalConfigPath = getGlobalConfigPath();
@@ -144,37 +229,11 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
     }
   }
 
-  // 5. Provider endpoint reachable + auth accepted (cheap /models ping)
+  // 5. Provider endpoint reachable + auth accepted (cheap /models ping; on auth
+  //    rejection fall back to a real /chat/completions probe — some gateways
+  //    admin-protect /models while the inference key remains valid, see #441)
   if (config) {
-    const pingUrl = `${config.model.baseUrl.replace(/\/+$/, '')}/models`;
-    try {
-      const headers: Record<string, string> = {};
-      if (config.model.apiKey) headers['Authorization'] = `Bearer ${config.model.apiKey}`;
-      const res = await fetch(pingUrl, { headers, signal: AbortSignal.timeout(8000) });
-      if (res.ok) {
-        results.push({ name: 'provider endpoint', status: 'PASS', detail: `${pingUrl} → ${res.status}` });
-      } else if (res.status === 401 || res.status === 403) {
-        results.push({
-          name: 'provider endpoint',
-          status: 'FAIL',
-          detail: `${pingUrl} → ${res.status} (auth rejected)`,
-          fix: 'Verify the API key is valid for this provider.',
-        });
-      } else {
-        results.push({
-          name: 'provider endpoint',
-          status: 'WARN',
-          detail: `${pingUrl} → ${res.status} (reachable, but /models did not return 2xx)`,
-        });
-      }
-    } catch (err) {
-      results.push({
-        name: 'provider endpoint',
-        status: 'FAIL',
-        detail: `${pingUrl} unreachable: ${err instanceof Error ? err.message : err}`,
-        fix: 'Check baseUrl, network connectivity, and that the provider is running.',
-      });
-    }
+    results.push(await probeProviderEndpoint(config));
   }
 
   // 6. Effective permissions report (+ CLI-flag override warning)
