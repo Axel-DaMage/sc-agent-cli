@@ -718,6 +718,17 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       throw new Error(noMeaningfulMsg);
     }
 
+    // Budget exhaustion: run stopped early but gracefully — emit a
+    // machine-greppable marker + distinct exit code (22 per #409 sketch),
+    // preserving the partial-work summary instead of a SIGKILL.
+    const budgetExceeded = agent.getStats().budgetExceeded;
+    if (budgetExceeded) {
+      saveSessionStatus('budget_exceeded', `budget:${budgetExceeded}`, history);
+      console.log(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
+      process.exitCode = 22;
+      return;
+    }
+
     // Zero-mutation signal: run completed but never called a mutating tool
     // (model refused, answered read-only, or only ran inspections). Emit a
     // machine-greppable marker as the last stdout line and exit with the

@@ -696,6 +696,9 @@ export interface AgentOptions {
   clearHistory?: boolean;
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
+  maxSteps?: number;
+  maxSeconds?: number;
+  maxTotalTokens?: number;
 }
 
 export class Agent {
@@ -711,6 +714,7 @@ export class Agent {
   private _toolRunCount: number = 0;
   private _lastCheckpointIteration: number = 0;
   private _sessionId: string = '';
+  private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
@@ -732,8 +736,8 @@ export class Agent {
     this._sessionId = options.sessionId || '';
   }
 
-  getStats(): { iterations: number; toolRunCount: number; sessionId: string } {
-    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId };
+  getStats(): { iterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
+    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
   }
 
   /**
@@ -863,6 +867,8 @@ export class Agent {
 
     let continueLoop = true;
     const MAX_ITERATIONS = parseInt(process.env.SC_MAX_ITERATIONS || '100', 10);
+    const runStartTime = Date.now();
+    let budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
     let iterations = 0;
     let selfHealCount = 0;
     const MAX_SELF_HEAL = 10;
@@ -895,6 +901,24 @@ export class Agent {
         this.log(chalk.gray('\n  ⚠️  Task aborted by user'));
         break;
       }
+
+      // Execution budgets (#408): graceful stop before the next LLM call —
+      // a budget hit ends the run cleanly instead of an external SIGKILL.
+      if (this.options.maxSeconds && Date.now() - runStartTime >= this.options.maxSeconds * 1000) {
+        budgetExceeded = 'seconds';
+      } else if (this.options.maxSteps && this._toolRunCount >= this.options.maxSteps) {
+        budgetExceeded = 'steps';
+      } else if (this.options.maxTotalTokens && this.tokenTracker.getUsage().totalTokens >= this.options.maxTotalTokens) {
+        budgetExceeded = 'tokens';
+      }
+      if (budgetExceeded) {
+        this._budgetExceeded = budgetExceeded;
+        if (!this.options.quiet) {
+          this.log(chalk.yellow(`\n  ⚠️  Budget exhausted (${budgetExceeded}) — ending run gracefully.`));
+        }
+        break;
+      }
+
       iterations++;
       this._iterations = iterations;
 
