@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import type { Message, ProjectConfig, StreamDelta, AgentCallbacks } from './types.js';
 import { OpenAICompatibleProvider } from './provider.js';
 import { loadProjectContext } from './project-context.js';
+import { probeRepo, formatRepoProfileForPrompt } from './repo-probe/index.js';
 import { ALL_TOOLS, getToolByName } from '../tools/registry.js';
 import type { ToolContext } from '../tools/tool.js';
 import { autoCorrectMessageSequence } from './message-validator.js';
@@ -861,6 +862,16 @@ export class Agent {
         verbose(`[METRICS] Context loading: ${isProjectQuery ? 'LOADED' : 'SKIPPED'} | Query length: ${userQuery.length} | Context size: ${projectContext?.length || 0}B`);
       }
 
+      let repoProfileContext: string | null = null;
+      if (isProjectQuery) {
+        try {
+          const profile = await probeRepo(this.options.workspaceRoot);
+          repoProfileContext = `\n# Repository Profile & Toolchain\n${formatRepoProfileForPrompt(profile)}`;
+        } catch {
+          // Non-fatal if probe fails
+        }
+      }
+
       const memoryContext = await persistentMemory.getContextString();
 
       // Detect shell environment for cross-platform adaptation
@@ -869,6 +880,7 @@ export class Agent {
       const shellPromptGuide = getShellPromptSections(shellInfo);
 
       const contextParts = [this.systemPrompt, shellContext, shellPromptGuide];
+      if (repoProfileContext) contextParts.push(repoProfileContext);
       if (projectContext) contextParts.push(`\n# Project Context\n${projectContext}`);
       if (memoryContext) contextParts.push(memoryContext);
       if (this.options.autoApprove) {

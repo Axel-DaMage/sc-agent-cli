@@ -19,6 +19,8 @@ const SLASH_COMMANDS = [
   '/clear',
   '/memory',
   '/info',
+  '/probe',
+  '/repo',
   '/env',
 ];
 
@@ -32,6 +34,8 @@ const TOOLS = [
   'run_shell',
   'web_fetch',
   'git',
+  'code_query',
+  'repo_probe',
   'memory_read',
   'memory_write',
 ];

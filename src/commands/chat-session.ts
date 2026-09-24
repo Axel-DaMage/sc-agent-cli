@@ -859,6 +859,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.white('  /clear                         ') + chalk.gray('- Clear conversation history'));
       console.log(chalk.white('  /memory                        ') + chalk.gray('- View/manage persistent memory'));
       console.log(chalk.white('  /config                        ') + chalk.gray('- Show full configuration details'));
+      console.log(chalk.white('  /probe                         ') + chalk.gray('- Auto-detect repo toolchain, package manager, and commands'));
       console.log(chalk.white('  /hud                           ') + chalk.gray('- Toggle compact status bar'));
       console.log(chalk.white('  /env                           ') + chalk.gray('- Environment diagnostic (tools, shell, versions)'));
       console.log(chalk.white('  /info                          ') + chalk.gray('- Quick summary'));
@@ -872,6 +873,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray('  • run_shell     - Execute shell commands'));
       console.log(chalk.gray('  • web_fetch     - Fetch URL content (docs, APIs)'));
       console.log(chalk.gray('  • git           - Native git operations'));
+      console.log(chalk.gray('  • repo_probe    - Probe repository toolchains & commands'));
       console.log(chalk.gray('  • memory_*      - Persistent cross-session memory'));
       console.log();
       continue;
@@ -1200,6 +1202,28 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         console.log();
       } catch {
         console.log(chalk.red('\n⚠️  Environment diagnostic failed\n'));
+      }
+      continue;
+    }
+
+    // Handle /probe command - auto-detect repo profile and toolchain
+    if (userInput.toLowerCase().startsWith('/probe') || userInput.toLowerCase().startsWith('/repo')) {
+      try {
+        const { probeRepo, formatRepoProfileForTerminal, formatRepoProfileJSON } = await import('../core/repo-probe/index.js');
+        const isJson = userInput.includes('--json') || userInput.includes(' json');
+        const isRefresh = userInput.includes('--refresh') || userInput.includes(' refresh') || userInput.includes('--no-cache');
+        const profile = await probeRepo(options.workspaceRoot, {
+          forceRefresh: isRefresh,
+          useCache: !isRefresh,
+        });
+        if (isJson) {
+          console.log(formatRepoProfileJSON(profile));
+        } else {
+          console.log(formatRepoProfileForTerminal(profile));
+        }
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.red(`\n✗ Probe failed: ${errorMsg}\n`));
       }
       continue;
     }

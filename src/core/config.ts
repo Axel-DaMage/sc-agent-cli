@@ -16,7 +16,7 @@ const DEFAULT_CONFIG: ProjectConfig = {
     stream: true,
   },
   permissions: {
-    autoApprove: ['read_file', 'list_dir', 'search_text', 'web_fetch', 'memory_read'],
+    autoApprove: ['read_file', 'list_dir', 'search_text', 'web_fetch', 'memory_read', 'code_query', 'repo_probe'],
     denyPaths: ['.env', '.env.*', '**/*.key', '**/*.pem'],
   },
   profiles: {

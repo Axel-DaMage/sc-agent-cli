@@ -10,6 +10,7 @@ import { memoryReadTool, memoryWriteTool } from './memory-tools.js';
 import { gitTool } from './git-tool.js';
 import { codeQueryTool } from './code-query.js';
 import { mcpValidateTool } from './mcp-validate-tool.js';
+import { repoProbeTool } from './repo-probe-tool.js';
 
 export const ALL_TOOLS: Tool[] = [
   readFileTool,
@@ -24,6 +25,7 @@ export const ALL_TOOLS: Tool[] = [
   gitTool,
   codeQueryTool,
   mcpValidateTool,
+  repoProbeTool,
 ];
 
 export function getToolByName(name: string): Tool | undefined {

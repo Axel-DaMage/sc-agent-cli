@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "sc": "bin/sc.js"
+    "sc": "bin/sc.js",
+    "scc": "bin/sc.js"
   },
   "scripts": {
     "prepare": "husky",

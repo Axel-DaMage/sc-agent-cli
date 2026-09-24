@@ -11,6 +11,7 @@ import { loadConfig, initConfig, getGlobalConfigPath } from './core/config.js';
 import { startChatSession } from './commands/chat-session.js';
 import { listProfiles, addProfile, useProfile, removeProfile } from './commands/profile.js';
 import { initProject } from './commands/init-command.js';
+import { probeCommand } from './commands/probe-command.js';
 import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
@@ -371,6 +372,21 @@ program
       console.error(chalk.red(`Error: ${errorMsg}`));
       process.exit(1);
     }
+  });
+
+// Probe repository profile
+program
+  .command('probe [path]')
+  .alias('repo-profile')
+  .alias('repo-probe')
+  .description('Auto-detect toolchain, package manager, and build/test/lint commands for a repository')
+  .option('-j, --json', 'Output repository profile as JSON')
+  .option('-s, --save', 'Save profile to .sc-agent/repo-profile.json')
+  .option('--no-cache', 'Bypass cache and force a fresh repository probe')
+  .option('-q, --quiet', 'Suppress terminal output')
+  .option('--prompt', 'Output formatted markdown for system prompt injection')
+  .action(async (targetPath, options) => {
+    await probeCommand(targetPath, options);
   });
 
 program.parse();
