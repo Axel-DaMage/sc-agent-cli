@@ -41,6 +41,9 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--summary-file <path>', 'Write the JSON run manifest to this file on exit (headless mode)')
+  .option('--output-file <path>', 'Alias of --summary-file (headless mode)')
+  .option('--output-format <format>', 'Batch stdout format: "text" (default) or "json" (manifest only)')
   .option('--max-steps <n>', 'Stop gracefully after N tool executions (env: SC_MAX_STEPS)')
   .option('--max-seconds <n>', 'Stop gracefully after N seconds of wall-clock time (env: SC_MAX_SECONDS)')
   .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
@@ -177,6 +180,11 @@ program
         permMode = options.permissions as 'ask_once' | 'always_ask' | 'unlimited';
       }
 
+      const outputFormat = options.outputFormat ?? 'text';
+      if (outputFormat !== 'text' && outputFormat !== 'json') {
+        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
+        process.exit(1);
+      }
       // Execution budgets: flag > env var; must be positive integers
       const budgetOpt = (flag: string | undefined, env: string | undefined, name: string): number | undefined => {
         const raw = flag ?? env;
@@ -194,9 +202,12 @@ program
         config,
         autoApprove: permMode === 'unlimited',
         initialPrompt: prompt,
-        quiet: options.quiet,
+        quiet: options.quiet || outputFormat === 'json',
         clearHistory: options.clear,
         permissionMode: permMode,
+        summaryFile: options.summaryFile,
+        outputFile: options.outputFile,
+        outputFormat,
         maxSteps: budgetOpt(options.maxSteps, process.env.SC_MAX_STEPS, '--max-steps'),
         maxSeconds: budgetOpt(options.maxSeconds, process.env.SC_MAX_SECONDS, '--max-seconds'),
         maxTotalTokens: budgetOpt(options.maxTotalTokens, process.env.SC_MAX_TOTAL_TOKENS, '--max-total-tokens'),

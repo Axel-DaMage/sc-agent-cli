@@ -7,7 +7,7 @@ const { version: packageVersion } = require('../../package.json') as { version: 
 import { stdin as input, stdout as output } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { Agent } from '../core/agent.js';
 import type { AgentOptions } from '../core/agent.js';
@@ -15,6 +15,7 @@ import type { Message } from '../core/types.js';
 import { loadConfig } from '../core/config.js';
 import { clearSessionPermissions } from '../utils/permissions.js';
 import { checkStorageLimit, enforceStorageLimit, formatBytes } from '../utils/storage-limit.js';
+import { estimateCost } from '../utils/token-tracker.js';
 import { getModelProfileEmptyStateGuidance } from './chat-session-guidance.js';
 import { getStorageGuidance } from '../utils/storage-guidance.js';
 import { statusBar, getShortcutsBar } from '../utils/status-bar.js';
@@ -513,8 +514,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   const configDir = join(homedir(), '.sc-agent');
   const storageInfo = checkStorageLimit(configDir);
 
-  // Non-interactive mode: skip UI decorations if quiet flag is set
-  const isQuiet = options.quiet || false;
+  // Non-interactive mode: skip UI decorations if quiet flag is set.
+  // --output-format json implies quiet: the manifest is the only stdout output.
+  const isQuiet = options.quiet || options.outputFormat === 'json';
   const isNonInteractive = Boolean(options.initialPrompt);
 
   if (!isQuiet) {
@@ -648,6 +650,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`\n${boxHeader('Assistant')}`));
     }
 
+    const batchStart = Date.now();
     let agentError: Error | undefined;
     try {
       history = await agent.run(userInput, history);
@@ -685,6 +688,42 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`  🆔 ${sessionId}\n`));
     }
 
+    // #415/#399: machine-readable run manifest — emitted as the LAST stdout
+    // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
+    // With `--output-format json` it is the ONLY stdout write.
+    const emitUsageSummary = (exitReason: 'success' | 'error' | 'no_changes' | 'budget_exceeded') => {
+      const usage = agent.tokenTracker.getUsage();
+      const stats = agent.getStats();
+      const lastAssistant = [...history].reverse().find(
+        m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0
+      );
+      const checkpointPath = join(homedir(), '.sc-agent', 'checkpoints', `${sessionId}.json`);
+      const summary = {
+        v: 1,
+        success: exitReason === 'success',
+        model: currentConfig.model.model,
+        tokens_in: usage.inputTokens,
+        tokens_out: usage.outputTokens,
+        estimated_cost_usd: estimateCost(currentConfig.model.model, usage.inputTokens, usage.outputTokens),
+        tool_calls: agent.getToolCallCounts(),
+        tool_calls_total: stats.toolRunCount,
+        iterations: stats.iterations,
+        duration_ms: Date.now() - batchStart,
+        exit_reason: exitReason,
+        final_message: lastAssistant ? String(lastAssistant.content).slice(0, 4000) : null,
+        checkpoint: existsSync(checkpointPath) ? checkpointPath : null,
+      };
+      for (const outPath of [options.summaryFile, options.outputFile]) {
+        if (!outPath) continue;
+        try {
+          writeFileSync(resolve(outPath), JSON.stringify(summary, null, 2));
+        } catch (e) {
+          verboseError(`manifest write failed (${outPath}): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      console.log(JSON.stringify(summary));
+    };
+
     // Save session trace (always, even on error)
     saveSessionTrace(history);
     verboseSession(sessionId, history.length);
@@ -694,6 +733,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       const errorMsg = agentError instanceof Error ? agentError.message : String(agentError);
       saveSessionStatus('error', errorMsg, history);
       verboseError(`Agent run failed: ${errorMsg}`);
+      emitUsageSummary('error');
       throw agentError;
     }
 
@@ -715,6 +755,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       saveSessionStatus('no_changes', undefined, history);
       const noMeaningfulMsg = 'No meaningful response generated. The model may not support this prompt length or format.';
       verboseError(noMeaningfulMsg);
+      emitUsageSummary('no_changes');
       throw new Error(noMeaningfulMsg);
     }
 
@@ -726,6 +767,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       saveSessionStatus('budget_exceeded', `budget:${budgetExceeded}`, history);
       console.log(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
       process.exitCode = 22;
+      emitUsageSummary('budget_exceeded');
       return;
     }
 
@@ -741,11 +783,13 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       saveSessionStatus('no_changes', undefined, history);
       console.log('SCC_NO_CHANGES');
       process.exitCode = 10;
+      emitUsageSummary('no_changes');
       return;
     }
 
     // Success — write status and exit
     saveSessionStatus('success', undefined, history);
+    emitUsageSummary('success');
     return;
   }
 
