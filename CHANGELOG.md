@@ -12,10 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ✨ Added
 
 - **Zero-mutation exit signal**: in batch mode a run that completes without calling any workspace-mutating tool (`write_file`/`edit_file`/`git`) prints `SCC_NO_CHANGES` as the last stdout line and exits with code `10` (success-no-changes, per the exit-code contract sketched in #409). Covers "model refused", "no tools executed" and read-only runs — clean exit, the caller decides. (Closes #412)
+- **`scc doctor`**: preflight diagnostics for headless/automation setups — validates config files parse, effective config schema, active profile resolution (with `--profile`/`SC_PROFILE` override warnings), API-key presence, provider endpoint reachability + auth via a cheap `/models` ping, and prints the effective permission set with flag-override warnings. Exits non-zero on any FAIL with per-item remediation. (Closes #411)
+
+- **`--prompt-file <path>`**: read the chat prompt from a file (or `-` for stdin) instead of the `[prompt]` argument. Eliminates shell quoting/escaping pitfalls and ARG_MAX limits for large prompts in automation. Mutually exclusive with the prompt argument; errors on missing or empty files. (Closes #413)
 
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
+
+- **Harmony-format tool calls no longer end the turn silently:** some OpenAI-compatible providers emit tool invocations as `<|channel|>commentary to=functions.X<|message|>{args}` markup inside `content` instead of structured `tool_calls`. The agent now recovers named blocks into real tool calls, re-prompts (max 2) on unrecoverable markup, and aborts with a clear error if the model persists — instead of reporting success with zero changes. (Fixes #417)
 
 - **Malformed tool-call arguments no longer crash the agent run:** `JSON.parse(toolCall.function.arguments)` was evaluated once inside `try` and again inside `catch`, so a model emitting invalid JSON (truncated stream, bad escaping — common with smaller/local models) made the rejection escape through `Promise.all` and kill the entire run. Arguments are now parsed once up front; malformed JSON returns a normal tool-error result so the model can self-correct. In headless runs (`sc chat -yq`) a single bad tool call previously meant full-run failure with zero changes produced. (Fixes #406)
 
