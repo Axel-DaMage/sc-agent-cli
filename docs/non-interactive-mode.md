@@ -128,6 +128,27 @@ sc -yq "run npm test and report results"
 | `-y, --yes` | Auto-approve all tool executions | Automation, trusted environments |
 | `-q, --quiet` | Suppress UI decorations | Piping output, logging |
 | `-yq` | Combined: auto-approve + quiet | Fully automated scripts |
+| `--output-format json` | Emit *only* the JSON run manifest on stdout | Machine consumers (CI workers, dashboards) |
+| `--summary-file <path>` / `--output-file <path>` | Also write the manifest to a file | Artifact collection, cost accounting |
+
+---
+
+## Run Manifest (JSON)
+
+In batch mode, the last stdout line is always a single-line JSON manifest — parse with `tail -1 | jq`. With `--output-format json` it is the *only* stdout output (the model's streamed answer is suppressed and carried in `final_message`).
+
+```bash
+sc chat -yq --output-format json --output-file run.json "add input validation"
+```
+
+```json
+{"v":1,"success":true,"model":"gpt-4o","tokens_in":41230,"tokens_out":3180,
+ "estimated_cost_usd":0.1284,"tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},
+ "tool_calls_total":10,"iterations":14,"duration_ms":84210,"exit_reason":"success",
+ "final_message":"Added zod validation to ...","checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json"}
+```
+
+`exit_reason` is one of `success | error | no_changes | budget_exceeded`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), and budget exhaustion (`SC_BUDGET_EXCEEDED`) — always as the last stdout line.
 
 ---
 
@@ -336,3 +357,41 @@ $ sc -q "analyze entire codebase" | head -20
 - ✅ Added `-q, --quiet` flag for minimal output
 - ✅ Auto-exit after processing single prompt
 - ✅ Compatible with all existing flags (`-y`)
+
+---
+
+## Resuming a Checkpoint
+
+```bash
+sc chat -yq --resume latest "CI failed on test X, fix it"
+sc chat -yq --resume <sessionId> "continue"
+sc chat -yq --resume ~/.sc-agent/checkpoints/<id>.json "…"
+```
+
+Restores the checkpoint's conversation history and reuses its session id (checkpoints keep saving under the same id, so remediation runs stay chainable). `--resume` with no value resolves the latest checkpoint for the current workspace.
+
+## Exit-Code Contract (stable, machine-consumable)
+
+Batch runs terminate with a documented exit code — wrappers branch on `$?` alone:
+
+| Code | Meaning | Marker on last stdout line |
+|------|---------|----------------------------|
+| `0`  | Success (changes produced, or interactive run) | — |
+| `1`  | Generic/unspecified error | `Error: …` |
+| `10` | Success, **zero mutations** — model refused / read-only / no tools executed | `SCC_NO_CHANGES` |
+| `20` | Provider error — network, timeout, 5xx, repeated empty responses | `Error: …` |
+| `21` | Auth error — 401/403, missing or invalid API key | `Error: …` |
+| `22` | Execution budget exhausted (`--max-steps`/`--max-seconds`/`--max-total-tokens`) | `SC_BUDGET_EXCEEDED <steps\|seconds\|tokens>` |
+| `23` | Agent-loop abort — tool livelock (`--livelock-threshold`), unrecoverable loop | `[SC_LIVELOCK] …` |
+
+Reserved: 2-9 clean terminals, 11-19 run outcomes, 24+ fatal. Codes are stable across releases.
+
+```bash
+scc chat -yq --max-steps 50 'implement issue #42'
+case $? in
+  0)  echo "PR-ready changes" ;;
+  10) echo "no-op run — check the issue spec" ;;
+  21) echo "rotate the provider key" ;;
+  22) echo "raise the budget or split the task" ;;
+esac
+```

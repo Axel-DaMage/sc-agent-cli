@@ -60,6 +60,7 @@ export interface ProjectConfig {
     autoApprove?: string[]; // glob patterns for auto-approved tools
     denyPaths?: string[]; // paths to never access
     denyCommands?: string[]; // shell command patterns to never execute (hard block)
+    denyGitMutation?: boolean; // hard-block git-mutating ops (orchestrators own git state)
     profile?: PermissionProfile; // Permission behavior profile
   };
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
@@ -72,6 +73,7 @@ export interface ProjectConfig {
       timeoutMs?: number; // per-request timeout (default 30000)
     }>;
   }; // MCP servers to consume as tool providers (stdio transport)
+  plugins?: string[]; // External tool modules to load (paths or package specifiers)
   settings?: {
     hud?: boolean; // Show HUD status line after responses (default: true)
     hudFields?: string[]; // Fields to show in HUD: model, profile, memories, messages, storage, permissions, tokens, iterations, cost

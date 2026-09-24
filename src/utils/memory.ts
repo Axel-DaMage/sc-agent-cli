@@ -77,21 +77,34 @@ export class PersistentMemory {
           return;
         }
         this.store = parsed;
+        // Keep new writes strictly ahead of every loaded entry
+        for (const e of this.store.entries) {
+          if (e.timestamp > this.lastTimestamp) this.lastTimestamp = e.timestamp;
+        }
       }
     } catch {
       // Start fresh if corrupt
     }
   }
 
+  // Strictly-increasing timestamp source: Date.now() has ~1ms resolution and
+  // ties under burst writes, which scrambles recency ordering (#433).
+  private lastTimestamp = 0;
+  private now(): number {
+    const t = Date.now();
+    this.lastTimestamp = t > this.lastTimestamp ? t : this.lastTimestamp + 1;
+    return this.lastTimestamp;
+  }
+
   private async save(): Promise<void> {
-    this.store.updated = Date.now();
+    this.store.updated = this.now();
     await writeFile(this.memoryFile, JSON.stringify(this.store, null, 2), 'utf-8');
   }
 
   async remember(key: string, content: string, tags: string[] = []): Promise<void> {
     await this.init();
     const existing = this.store.entries.findIndex(e => e.key === key);
-    const entry: MemoryEntry = { key, content, timestamp: Date.now(), tags };
+    const entry: MemoryEntry = { key, content, timestamp: this.now(), tags };
     if (existing >= 0) {
       this.store.entries[existing] = entry;
     } else {

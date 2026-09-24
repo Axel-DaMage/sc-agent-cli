@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import chalk from 'chalk';
 import { findLatestCheckpoint, loadCheckpoint, printCheckpointInfo } from '../utils/checkpoint.js';
 import type { CheckpointData } from '../utils/checkpoint.js';
@@ -21,6 +22,24 @@ export async function resumeSession(workspaceRoot: string): Promise<CheckpointDa
 
 export async function findResumeCheckpoint(workspaceRoot: string): Promise<CheckpointData | null> {
   return findLatestCheckpoint(workspaceRoot);
+}
+
+// Resolve a --resume argument: 'latest' | sessionId | path to a checkpoint .json file.
+export function resolveCheckpointRef(ref: string | true, workspaceRoot: string): CheckpointData | null {
+  if (ref === true || ref === 'latest') {
+    return findLatestCheckpoint(workspaceRoot);
+  }
+  if (ref.endsWith('.json') || ref.includes('/') || ref.includes('\\')) {
+    const p = path.resolve(ref);
+    if (!existsSync(p)) return null;
+    try {
+      const data = JSON.parse(readFileSync(p, 'utf-8')) as CheckpointData;
+      return data.version === 1 && Array.isArray(data.history) ? data : null;
+    } catch {
+      return null;
+    }
+  }
+  return loadCheckpoint(ref);
 }
 
 export function formatResumeContext(cp: CheckpointData): string {
