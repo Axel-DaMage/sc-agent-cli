@@ -40,6 +40,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--no-commit', 'Hard-block git mutations inside the session (for orchestrators that own git state)')
   .option('--prompt-file <path>', 'Read the prompt from a file (use "-" to read from stdin). Mutually exclusive with the prompt argument.')
   .action(async (prompt: string | undefined, options) => {
     try {
@@ -155,6 +156,11 @@ program
           process.exit(1);
         }
         config.model.timeout = parsed;
+      }
+
+      // --no-commit: orchestrators own git state — hard-block mutations in-session
+      if (options.commit === false) {
+        config.permissions = { ...config.permissions, denyGitMutation: true };
       }
 
       // Permissions mode mapping
