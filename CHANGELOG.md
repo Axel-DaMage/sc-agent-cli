@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **`--audit-log <path>`**: append a JSONL forensic record per run — one object per `llm_request`/`llm_response` (iteration, model, duration, est. tokens) and `tool_call`/`tool_result` (name, sha256 args digest, duration, success/error). Sync append per event survives crashes; args are hashed to avoid leaking secrets; zero cost when the flag is absent. Gives workers the forensic record they currently approximate by regex-counting stdout lines. (Closes #410)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
