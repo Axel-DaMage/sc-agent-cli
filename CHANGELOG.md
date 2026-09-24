@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **`--livelock-threshold <n>`**: abort the run when the model emits N consecutive non-empty responses without tool calls (default: 3 in auto-approve/`-y` mode, 0 disables). Prevents "tool livelock" where weak models narrate plans indefinitely under self-heal nudges — burning the full run budget with zero mutations. Fails with a greppable `[SC_LIVELOCK]` error preserving the last model output. (Closes #416)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed

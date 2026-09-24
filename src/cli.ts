@@ -37,6 +37,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
   .action(async (prompt: string | undefined, options) => {
     try {
       // Count -v flags from raw argv
@@ -130,6 +131,15 @@ program
         config.model.timeout = parsed;
       }
 
+      let livelockThreshold: number | undefined;
+      if (options.livelockThreshold !== undefined) {
+        livelockThreshold = parseInt(options.livelockThreshold, 10);
+        if (isNaN(livelockThreshold) || livelockThreshold < 0) {
+          console.error(chalk.red(`Error: --livelock-threshold must be a non-negative integer`));
+          process.exit(1);
+        }
+      }
+
       // Permissions mode mapping
       let permMode: 'ask_once' | 'always_ask' | 'unlimited' | undefined = options.yes ? 'unlimited' : undefined;
       if (options.permissions) {
@@ -148,6 +158,7 @@ program
         quiet: options.quiet,
         clearHistory: options.clear,
         permissionMode: permMode,
+        livelockThreshold,
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
