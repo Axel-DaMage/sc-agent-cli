@@ -148,7 +148,7 @@ sc chat -yq --output-format json --output-file run.json "add input validation"
  "final_message":"Added zod validation to ...","checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json"}
 ```
 
-`exit_reason` is one of `success | error | no_changes`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, and no-changes.
+`exit_reason` is one of `success | error | no_changes | budget_exceeded`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), and budget exhaustion (`SC_BUDGET_EXCEEDED`) — always as the last stdout line.
 
 ---
 
@@ -357,3 +357,31 @@ $ sc -q "analyze entire codebase" | head -20
 - ✅ Added `-q, --quiet` flag for minimal output
 - ✅ Auto-exit after processing single prompt
 - ✅ Compatible with all existing flags (`-y`)
+
+---
+
+## Exit-Code Contract (stable, machine-consumable)
+
+Batch runs terminate with a documented exit code — wrappers branch on `$?` alone:
+
+| Code | Meaning | Marker on last stdout line |
+|------|---------|----------------------------|
+| `0`  | Success (changes produced, or interactive run) | — |
+| `1`  | Generic/unspecified error | `Error: …` |
+| `10` | Success, **zero mutations** — model refused / read-only / no tools executed | `SCC_NO_CHANGES` |
+| `20` | Provider error — network, timeout, 5xx, repeated empty responses | `Error: …` |
+| `21` | Auth error — 401/403, missing or invalid API key | `Error: …` |
+| `22` | Execution budget exhausted (`--max-steps`/`--max-seconds`/`--max-total-tokens`) | `SC_BUDGET_EXCEEDED <steps\|seconds\|tokens>` |
+| `23` | Agent-loop abort — tool livelock (`--livelock-threshold`), unrecoverable loop | `[SC_LIVELOCK] …` |
+
+Reserved: 2-9 clean terminals, 11-19 run outcomes, 24+ fatal. Codes are stable across releases.
+
+```bash
+scc chat -yq --max-steps 50 'implement issue #42'
+case $? in
+  0)  echo "PR-ready changes" ;;
+  10) echo "no-op run — check the issue spec" ;;
+  21) echo "rotate the provider key" ;;
+  22) echo "raise the budget or split the task" ;;
+esac
+```

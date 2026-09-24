@@ -701,6 +701,9 @@ export interface AgentOptions {
   /** 'json' suppresses all human stdout (banner, streamed answer) — the run
    *  manifest JSON line is the only stdout output. */
   outputFormat?: 'text' | 'json';
+  maxSteps?: number;
+  maxSeconds?: number;
+  maxTotalTokens?: number;
 }
 
 export class Agent {
@@ -717,6 +720,7 @@ export class Agent {
   private _toolCallCounts = new Map<string, number>();
   private _lastCheckpointIteration: number = 0;
   private _sessionId: string = '';
+  private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
@@ -738,8 +742,8 @@ export class Agent {
     this._sessionId = options.sessionId || '';
   }
 
-  getStats(): { iterations: number; toolRunCount: number; sessionId: string } {
-    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId };
+  getStats(): { iterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
+    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
   }
 
   /** Per-tool invocation counts for the current session (#415 usage summary). */
@@ -874,11 +878,15 @@ export class Agent {
 
     let continueLoop = true;
     const MAX_ITERATIONS = parseInt(process.env.SC_MAX_ITERATIONS || '100', 10);
+    const runStartTime = Date.now();
+    let budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
     let iterations = 0;
     let selfHealCount = 0;
     const MAX_SELF_HEAL = 10;
     let emptyResponseCount = 0;
     let totalEmptyResponses = 0;
+    let harmonyRepromptCount = 0;
+    const MAX_HARMONY_REPROMPTS = 2;
     let forceToolChoice = false;
     const toolsUsed: Array<{name: string; success: boolean; error?: string; args?: Record<string, unknown>}> = [];
 
@@ -904,6 +912,24 @@ export class Agent {
         this.log(chalk.gray('\n  ⚠️  Task aborted by user'));
         break;
       }
+
+      // Execution budgets (#408): graceful stop before the next LLM call —
+      // a budget hit ends the run cleanly instead of an external SIGKILL.
+      if (this.options.maxSeconds && Date.now() - runStartTime >= this.options.maxSeconds * 1000) {
+        budgetExceeded = 'seconds';
+      } else if (this.options.maxSteps && this._toolRunCount >= this.options.maxSteps) {
+        budgetExceeded = 'steps';
+      } else if (this.options.maxTotalTokens && this.tokenTracker.getUsage().totalTokens >= this.options.maxTotalTokens) {
+        budgetExceeded = 'tokens';
+      }
+      if (budgetExceeded) {
+        this._budgetExceeded = budgetExceeded;
+        if (!this.options.quiet) {
+          this.log(chalk.yellow(`\n  ⚠️  Budget exhausted (${budgetExceeded}) — ending run gracefully.`));
+        }
+        break;
+      }
+
       iterations++;
       this._iterations = iterations;
 
@@ -1039,6 +1065,42 @@ export class Agent {
         emptyResponseCount = 0; // Reset consecutive empty responses counter
         this.provider.setConsecutiveEmpty(0);
         this.provider.setLastCallWasError(false);
+      }
+
+      // Recover Harmony-format tool calls leaked into `content` (#417): some
+      // providers emit "<|channel|>commentary to=functions.X<|message|>{args}"
+      // as plain text instead of structured tool_calls, which would otherwise
+      // end the turn silently with zero changes.
+      const noStructuredCalls = !response.tool_calls || response.tool_calls.length === 0;
+      if (noStructuredCalls && typeof response.content === 'string' && response.content.includes('<|channel|>')) {
+        const { recoverHarmonyToolCalls, hasHarmonyMarkup } = await import('../utils/harmony-format.js');
+        if (hasHarmonyMarkup(response.content)) {
+          const recovered = recoverHarmonyToolCalls(response.content);
+          if (recovered.length > 0) {
+            response.tool_calls = recovered;
+            assistantMessage.tool_calls = recovered;
+            if (!this.options.quiet) {
+              this.log(chalk.yellow(`\n  │ ♻️  Recovered ${recovered.length} tool call(s) from Harmony markup in content`));
+            }
+          } else {
+            harmonyRepromptCount++;
+            if (harmonyRepromptCount <= MAX_HARMONY_REPROMPTS) {
+              messages.push({
+                role: 'user',
+                content: `[MALFORMED TOOL CALL ${harmonyRepromptCount}/${MAX_HARMONY_REPROMPTS}] Your previous message embedded a tool call as Harmony markup ("<|channel|>...<|message|>") inside content instead of a structured tool call. Re-emit the intended action using the proper tool_calls field. Do NOT output <|channel|> markup.`,
+              });
+              if (!this.options.quiet) {
+                this.log(chalk.yellow(`\n  │ 🔄 Harmony markup detected in content — re-prompting (${harmonyRepromptCount}/${MAX_HARMONY_REPROMPTS})...`));
+              }
+              continue;
+            }
+            throw new Error(
+              `Model emitted Harmony markup tool calls inside content ${harmonyRepromptCount} times instead of structured tool_calls. ` +
+              'This indicates a provider/model format incompatibility — try a different model, ' +
+              'lower temperature (0.2-0.3), or disabling streaming (stream: false).'
+            );
+          }
+        }
       }
 
       // Handle tool calls if any - PARALLEL EXECUTION
