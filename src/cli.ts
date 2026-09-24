@@ -5,12 +5,16 @@ import chalk from 'chalk';
 // Force color support for markdown rendering and UI
 if (chalk.level < 2) chalk.level = 2;
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig, initConfig, getGlobalConfigPath } from './core/config.js';
 import { startChatSession } from './commands/chat-session.js';
 import { listProfiles, addProfile, useProfile, removeProfile } from './commands/profile.js';
 import { initProject } from './commands/init-command.js';
+import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
+import { classifyError } from './utils/exit-codes.js';
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('../package.json') as { version: string };
@@ -38,8 +42,41 @@ program
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
   .option('--resume [ref]', 'Resume a checkpoint: session id, .json path, or "latest" (default when flag is bare)')
+  .option('--audit-log <path>', 'Append a JSONL audit event per LLM call and tool execution (headless forensics)')
+  .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
+  .option('--summary-file <path>', 'Write the JSON run manifest to this file on exit (headless mode)')
+  .option('--output-file <path>', 'Alias of --summary-file (headless mode)')
+  .option('--output-format <format>', 'Batch stdout format: "text" (default) or "json" (manifest only)')
+  .option('--max-steps <n>', 'Stop gracefully after N tool executions (env: SC_MAX_STEPS)')
+  .option('--max-seconds <n>', 'Stop gracefully after N seconds of wall-clock time (env: SC_MAX_SECONDS)')
+  .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
+  .option('--no-commit', 'Hard-block git mutations inside the session (for orchestrators that own git state)')
+  .option('--prompt-file <path>', 'Read the prompt from a file (use "-" to read from stdin). Mutually exclusive with the prompt argument.')
   .action(async (prompt: string | undefined, options) => {
     try {
+      // --prompt-file: load the prompt from a file instead of argv (#413).
+      // Large prompts passed as argv hit shell quoting/escaping issues and
+      // ARG_MAX limits; a file (or stdin) avoids both.
+      if (options.promptFile !== undefined) {
+        if (prompt !== undefined) {
+          console.error(chalk.red('Error: cannot combine a [prompt] argument with --prompt-file'));
+          process.exit(1);
+        }
+        try {
+          prompt = options.promptFile === '-'
+            ? readFileSync(0, 'utf-8')
+            : readFileSync(resolve(options.promptFile), 'utf-8');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`Error: cannot read prompt file "${options.promptFile}": ${msg}`));
+          process.exit(1);
+        }
+        if (!prompt.trim()) {
+          console.error(chalk.red(`Error: prompt file "${options.promptFile}" is empty`));
+          process.exit(1);
+        }
+      }
+
       // Count -v flags from raw argv
       const verboseCount = (() => {
         let count = 0;
@@ -142,6 +179,20 @@ program
         }
       }
 
+      let livelockThreshold: number | undefined;
+      if (options.livelockThreshold !== undefined) {
+        livelockThreshold = parseInt(options.livelockThreshold, 10);
+        if (isNaN(livelockThreshold) || livelockThreshold < 0) {
+          console.error(chalk.red(`Error: --livelock-threshold must be a non-negative integer`));
+          process.exit(1);
+        }
+      }
+
+      // --no-commit: orchestrators own git state — hard-block mutations in-session
+      if (options.commit === false) {
+        config.permissions = { ...config.permissions, denyGitMutation: true };
+      }
+
       // Permissions mode mapping
       let permMode: 'ask_once' | 'always_ask' | 'unlimited' | undefined = options.yes ? 'unlimited' : undefined;
       if (options.permissions) {
@@ -152,22 +203,57 @@ program
         permMode = options.permissions as 'ask_once' | 'always_ask' | 'unlimited';
       }
 
+      const outputFormat = options.outputFormat ?? 'text';
+      if (outputFormat !== 'text' && outputFormat !== 'json') {
+        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
+        process.exit(1);
+      }
+      // Execution budgets: flag > env var; must be positive integers
+      const budgetOpt = (flag: string | undefined, env: string | undefined, name: string): number | undefined => {
+        const raw = flag ?? env;
+        if (raw === undefined) return undefined;
+        const n = parseInt(raw, 10);
+        if (isNaN(n) || n <= 0) {
+          console.error(chalk.red(`Error: ${name} must be a positive integer`));
+          process.exit(1);
+        }
+        return n;
+      };
+
       await startChatSession({
         workspaceRoot: process.cwd(),
         config,
         autoApprove: permMode === 'unlimited',
         initialPrompt: prompt,
-        quiet: options.quiet,
+        quiet: options.quiet || outputFormat === 'json',
         clearHistory: options.clear,
         permissionMode: permMode,
         sessionId: resumeCheckpoint?.sessionId,
         resumeCheckpoint,
+        auditLog: options.auditLog,
+        livelockThreshold,
+        summaryFile: options.summaryFile,
+        outputFile: options.outputFile,
+        outputFormat,
+        maxSteps: budgetOpt(options.maxSteps, process.env.SC_MAX_STEPS, '--max-steps'),
+        maxSeconds: budgetOpt(options.maxSeconds, process.env.SC_MAX_SECONDS, '--max-seconds'),
+        maxTotalTokens: budgetOpt(options.maxTotalTokens, process.env.SC_MAX_TOTAL_TOKENS, '--max-total-tokens'),
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Error: ${errorMsg}`));
-      process.exit(1);
+      process.exit(classifyError(err));
     }
+  });
+
+// Doctor: preflight diagnostics for headless/automation use
+program
+  .command('doctor')
+  .description('Diagnose config, provider connectivity, API key, and effective permissions')
+  .option('-m, --profile <profile>', 'Check a specific profile as if passed to chat')
+  .option('--permissions <mode>', 'Check a permissions override as if passed to chat')
+  .action(async (options) => {
+    await runDoctor(options);
   });
 
 // Profile management

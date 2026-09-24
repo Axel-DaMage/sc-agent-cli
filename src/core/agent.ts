@@ -13,6 +13,7 @@ import { enhanceError, formatEnhancedError } from '../utils/error-enhancer.js';
 import { boxHeader, boxFooter } from '../utils/box-drawing.js';
 import { TokenTracker, estimateMessageTokens } from '../utils/token-tracker.js';
 import { saveCheckpoint } from '../utils/checkpoint.js';
+import { AuditLogger } from '../utils/audit-log.js';
 import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
 import { resolveThrottleConfig } from '../utils/throttle.js';
 
@@ -697,6 +698,16 @@ export interface AgentOptions {
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
   resumeCheckpoint?: import('../utils/checkpoint.js').CheckpointData;
+  auditLog?: string;
+  livelockThreshold?: number;
+  summaryFile?: string;
+  outputFile?: string;
+  /** 'json' suppresses all human stdout (banner, streamed answer) — the run
+   *  manifest JSON line is the only stdout output. */
+  outputFormat?: 'text' | 'json';
+  maxSteps?: number;
+  maxSeconds?: number;
+  maxTotalTokens?: number;
 }
 
 export class Agent {
@@ -710,8 +721,11 @@ export class Agent {
   public tokenTracker: TokenTracker;
   private _iterations: number = 0;
   private _toolRunCount: number = 0;
+  private _toolCallCounts = new Map<string, number>();
   private _lastCheckpointIteration: number = 0;
   private _sessionId: string = '';
+  private audit?: AuditLogger;
+  private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
@@ -731,10 +745,22 @@ export class Agent {
     this.shellInfo = detectShell();
     this.tokenTracker = new TokenTracker(options.config.model.model);
     this._sessionId = options.sessionId || '';
+    if (options.auditLog) {
+      try {
+        this.audit = new AuditLogger(options.auditLog);
+      } catch {
+        this.audit = undefined; // unwritable path must not block the run
+      }
+    }
   }
 
-  getStats(): { iterations: number; toolRunCount: number; sessionId: string } {
-    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId };
+  getStats(): { iterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
+    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
+  }
+
+  /** Per-tool invocation counts for the current session (#415 usage summary). */
+  getToolCallCounts(): Record<string, number> {
+    return Object.fromEntries(this._toolCallCounts);
   }
 
   /**
@@ -864,11 +890,17 @@ export class Agent {
 
     let continueLoop = true;
     const MAX_ITERATIONS = parseInt(process.env.SC_MAX_ITERATIONS || '100', 10);
+    const runStartTime = Date.now();
+    let budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
     let iterations = 0;
     let selfHealCount = 0;
     const MAX_SELF_HEAL = 10;
     let emptyResponseCount = 0;
     let totalEmptyResponses = 0;
+    let consecutiveNoToolResponses = 0;
+    const livelockLimit = this.options.livelockThreshold ?? (this.options.autoApprove ? 3 : 0);
+    let harmonyRepromptCount = 0;
+    const MAX_HARMONY_REPROMPTS = 2;
     let forceToolChoice = false;
     const toolsUsed: Array<{name: string; success: boolean; error?: string; args?: Record<string, unknown>}> = [];
 
@@ -894,6 +926,24 @@ export class Agent {
         this.log(chalk.gray('\n  ⚠️  Task aborted by user'));
         break;
       }
+
+      // Execution budgets (#408): graceful stop before the next LLM call —
+      // a budget hit ends the run cleanly instead of an external SIGKILL.
+      if (this.options.maxSeconds && Date.now() - runStartTime >= this.options.maxSeconds * 1000) {
+        budgetExceeded = 'seconds';
+      } else if (this.options.maxSteps && this._toolRunCount >= this.options.maxSteps) {
+        budgetExceeded = 'steps';
+      } else if (this.options.maxTotalTokens && this.tokenTracker.getUsage().totalTokens >= this.options.maxTotalTokens) {
+        budgetExceeded = 'tokens';
+      }
+      if (budgetExceeded) {
+        this._budgetExceeded = budgetExceeded;
+        if (!this.options.quiet) {
+          this.log(chalk.yellow(`\n  ⚠️  Budget exhausted (${budgetExceeded}) — ending run gracefully.`));
+        }
+        break;
+      }
+
       iterations++;
       this._iterations = iterations;
 
@@ -920,9 +970,14 @@ export class Agent {
       }
 
       // Estimate input tokens before sending
+      let reqEstTokens = 0;
       for (const msg of messages) {
-        this.tokenTracker.addInput(estimateMessageTokens(msg));
+        const est = estimateMessageTokens(msg);
+        reqEstTokens += est;
+        this.tokenTracker.addInput(est);
       }
+      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
+      const llmStartTime = Date.now();
 
       // Show thinking indicator on first iteration
       if (iterations === 1 && !this.options.quiet) {
@@ -947,18 +1002,30 @@ export class Agent {
         this.provider.setLastCallWasError(false);
       } catch (err) {
         this.provider.setLastCallWasError(true);
+        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
         throw err;
       }
 
       // Track output tokens
+      let resEstTokens = 0;
       if (response.content) {
-        this.tokenTracker.addOutput(estimateMessageTokens({ role: 'assistant', content: response.content }));
+        const est = estimateMessageTokens({ role: 'assistant', content: response.content });
+        resEstTokens += est;
+        this.tokenTracker.addOutput(est);
       }
       if (response.tool_calls) {
         for (const tc of response.tool_calls) {
-          this.tokenTracker.addOutput(estimateMessageTokens({ role: 'assistant', content: tc.function.name + tc.function.arguments }));
+          const est = estimateMessageTokens({ role: 'assistant', content: tc.function.name + tc.function.arguments });
+          resEstTokens += est;
+          this.tokenTracker.addOutput(est);
         }
       }
+      this.audit?.emit({
+        type: 'llm_response', iteration: iterations, model: this.options.config.model.model,
+        duration_ms: Date.now() - llmStartTime, status: 'ok',
+        content_bytes: response.content?.length ?? 0, tool_calls: response.tool_calls?.length ?? 0,
+        est_tokens: resEstTokens,
+      });
 
       // Save checkpoint every 5 iterations for long-running sessions
       if (this._sessionId && iterations - this._lastCheckpointIteration >= 5) {
@@ -1031,8 +1098,45 @@ export class Agent {
         this.provider.setLastCallWasError(false);
       }
 
+      // Recover Harmony-format tool calls leaked into `content` (#417): some
+      // providers emit "<|channel|>commentary to=functions.X<|message|>{args}"
+      // as plain text instead of structured tool_calls, which would otherwise
+      // end the turn silently with zero changes.
+      const noStructuredCalls = !response.tool_calls || response.tool_calls.length === 0;
+      if (noStructuredCalls && typeof response.content === 'string' && response.content.includes('<|channel|>')) {
+        const { recoverHarmonyToolCalls, hasHarmonyMarkup } = await import('../utils/harmony-format.js');
+        if (hasHarmonyMarkup(response.content)) {
+          const recovered = recoverHarmonyToolCalls(response.content);
+          if (recovered.length > 0) {
+            response.tool_calls = recovered;
+            assistantMessage.tool_calls = recovered;
+            if (!this.options.quiet) {
+              this.log(chalk.yellow(`\n  │ ♻️  Recovered ${recovered.length} tool call(s) from Harmony markup in content`));
+            }
+          } else {
+            harmonyRepromptCount++;
+            if (harmonyRepromptCount <= MAX_HARMONY_REPROMPTS) {
+              messages.push({
+                role: 'user',
+                content: `[MALFORMED TOOL CALL ${harmonyRepromptCount}/${MAX_HARMONY_REPROMPTS}] Your previous message embedded a tool call as Harmony markup ("<|channel|>...<|message|>") inside content instead of a structured tool call. Re-emit the intended action using the proper tool_calls field. Do NOT output <|channel|> markup.`,
+              });
+              if (!this.options.quiet) {
+                this.log(chalk.yellow(`\n  │ 🔄 Harmony markup detected in content — re-prompting (${harmonyRepromptCount}/${MAX_HARMONY_REPROMPTS})...`));
+              }
+              continue;
+            }
+            throw new Error(
+              `Model emitted Harmony markup tool calls inside content ${harmonyRepromptCount} times instead of structured tool_calls. ` +
+              'This indicates a provider/model format incompatibility — try a different model, ' +
+              'lower temperature (0.2-0.3), or disabling streaming (stream: false).'
+            );
+          }
+        }
+      }
+
       // Handle tool calls if any - PARALLEL EXECUTION
       if (response.tool_calls && response.tool_calls.length > 0) {
+        consecutiveNoToolResponses = 0;
         this.log(chalk.gray(`\n${boxHeader('Tools', 2)}`));
 
         const isMultiple = response.tool_calls.length > 1;
@@ -1053,6 +1157,7 @@ export class Agent {
     const executeTool = async (toolCall: NonNullable<typeof response.tool_calls>[number]) => {
       this._toolRunCount++;
           const toolName = toolCall.function.name;
+          this._toolCallCounts.set(toolName, (this._toolCallCounts.get(toolName) || 0) + 1);
           const tool = getToolByName(toolName);
 
           if (!tool) {
@@ -1077,6 +1182,7 @@ export class Agent {
             const parseError = `Invalid tool arguments JSON for ${toolName}: ${String(toolCall.function.arguments || '').slice(0, 200)}`;
             this.emitToolError(toolName, parseError);
             this.log(chalk.gray(`  │ ${chalk.red('✗')} ${toolName}: ${parseError}`));
+            this.audit?.emit({ type: 'tool_result', name: toolName, success: false, phase: 'args_parse', error: parseError.slice(0, 200) });
             toolsUsed.push({name: toolName, success: false, error: parseError});
             return {
               role: 'tool' as const,
@@ -1086,19 +1192,20 @@ export class Agent {
             };
           }
 
+          const toolStartTime = Date.now();
           try {
-            const toolStartTime = Date.now();
-
             verboseToolCall(toolName, args);
 
             // Emit tool start event
             this.emitToolStart(toolName, args);
+            this.audit?.emit({ type: 'tool_call', iteration: iterations, name: toolName, args_digest: AuditLogger.digest(args) });
 
             const result = await tool.execute(args, this.toolContext);
             const toolDuration = Date.now() - toolStartTime;
 
             // Emit tool complete event
             this.emitToolComplete(toolName, result, toolDuration);
+            this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: true, duration_ms: toolDuration, result_bytes: result?.length ?? 0 });
 
             if (isMultiple) {
               this.log(chalk.gray(`  │    ${chalk.green('✓')} ${toolName}`));
@@ -1121,6 +1228,7 @@ export class Agent {
 
             // Emit tool error event
             this.emitToolError(toolName, errorMsg);
+            this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, duration_ms: Date.now() - toolStartTime, error: errorMsg.slice(0, 200) });
 
             this.log(chalk.gray(`  │ ${errorIcon} ${toolName} failed: ${errorMsg}`));
             toolsUsed.push({name: toolName, success: false, error: errorMsg, args});
@@ -1190,6 +1298,20 @@ export class Agent {
         // No tool calls — check if LLM is reporting errors without fixing them
         const content = response.content || '';
         const hasToolRun = toolsUsed.length > 0;
+
+        // Tool livelock detection: N consecutive non-empty responses without
+        // tool calls means the model narrates instead of acting. A single
+        // text response is fine (legit final answer ends the loop at 1) —
+        // only a streak reaching the threshold is a livelock.
+        consecutiveNoToolResponses++;
+        if (livelockLimit > 0 && consecutiveNoToolResponses >= livelockLimit) {
+          const lastOutput = content.trim().slice(0, 300);
+          throw new Error(
+            `[SC_LIVELOCK] Model produced ${consecutiveNoToolResponses} consecutive responses ` +
+            `without tool calls in ${iterations} iterations — aborting run (tool livelock). ` +
+            `Last model output: "${lastOutput}"`
+          );
+        }
 
         // Skip self-heal for purely conversational responses (greetings, clarifications, etc.)
         // But NOT if they also include concrete future actions
@@ -1351,6 +1473,8 @@ export class Agent {
 
   private onStreamChunk(delta: StreamDelta): void {
     if (delta.content) {
+      // JSON headless mode: the manifest carries final_message — keep stdout clean
+      if (this.options.outputFormat === 'json') return;
       // Clear thinking indicator on first content
       if (this._thinkingShown) {
         // ANSI: erase entire line, carriage return
