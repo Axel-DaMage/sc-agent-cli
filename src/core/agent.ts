@@ -13,6 +13,7 @@ import { enhanceError, formatEnhancedError } from '../utils/error-enhancer.js';
 import { boxHeader, boxFooter } from '../utils/box-drawing.js';
 import { TokenTracker, estimateMessageTokens } from '../utils/token-tracker.js';
 import { saveCheckpoint } from '../utils/checkpoint.js';
+import { AuditLogger } from '../utils/audit-log.js';
 import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
 import { resolveThrottleConfig } from '../utils/throttle.js';
 
@@ -696,6 +697,7 @@ export interface AgentOptions {
   clearHistory?: boolean;
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
+  auditLog?: string;
   livelockThreshold?: number;
   summaryFile?: string;
   outputFile?: string;
@@ -721,6 +723,7 @@ export class Agent {
   private _toolCallCounts = new Map<string, number>();
   private _lastCheckpointIteration: number = 0;
   private _sessionId: string = '';
+  private audit?: AuditLogger;
   private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
 
   constructor(private options: AgentOptions) {
@@ -741,6 +744,13 @@ export class Agent {
     this.shellInfo = detectShell();
     this.tokenTracker = new TokenTracker(options.config.model.model);
     this._sessionId = options.sessionId || '';
+    if (options.auditLog) {
+      try {
+        this.audit = new AuditLogger(options.auditLog);
+      } catch {
+        this.audit = undefined; // unwritable path must not block the run
+      }
+    }
   }
 
   getStats(): { iterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
@@ -959,9 +969,14 @@ export class Agent {
       }
 
       // Estimate input tokens before sending
+      let reqEstTokens = 0;
       for (const msg of messages) {
-        this.tokenTracker.addInput(estimateMessageTokens(msg));
+        const est = estimateMessageTokens(msg);
+        reqEstTokens += est;
+        this.tokenTracker.addInput(est);
       }
+      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
+      const llmStartTime = Date.now();
 
       // Show thinking indicator on first iteration
       if (iterations === 1 && !this.options.quiet) {
@@ -986,18 +1001,30 @@ export class Agent {
         this.provider.setLastCallWasError(false);
       } catch (err) {
         this.provider.setLastCallWasError(true);
+        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
         throw err;
       }
 
       // Track output tokens
+      let resEstTokens = 0;
       if (response.content) {
-        this.tokenTracker.addOutput(estimateMessageTokens({ role: 'assistant', content: response.content }));
+        const est = estimateMessageTokens({ role: 'assistant', content: response.content });
+        resEstTokens += est;
+        this.tokenTracker.addOutput(est);
       }
       if (response.tool_calls) {
         for (const tc of response.tool_calls) {
-          this.tokenTracker.addOutput(estimateMessageTokens({ role: 'assistant', content: tc.function.name + tc.function.arguments }));
+          const est = estimateMessageTokens({ role: 'assistant', content: tc.function.name + tc.function.arguments });
+          resEstTokens += est;
+          this.tokenTracker.addOutput(est);
         }
       }
+      this.audit?.emit({
+        type: 'llm_response', iteration: iterations, model: this.options.config.model.model,
+        duration_ms: Date.now() - llmStartTime, status: 'ok',
+        content_bytes: response.content?.length ?? 0, tool_calls: response.tool_calls?.length ?? 0,
+        est_tokens: resEstTokens,
+      });
 
       // Save checkpoint every 5 iterations for long-running sessions
       if (this._sessionId && iterations - this._lastCheckpointIteration >= 5) {
@@ -1154,6 +1181,7 @@ export class Agent {
             const parseError = `Invalid tool arguments JSON for ${toolName}: ${String(toolCall.function.arguments || '').slice(0, 200)}`;
             this.emitToolError(toolName, parseError);
             this.log(chalk.gray(`  │ ${chalk.red('✗')} ${toolName}: ${parseError}`));
+            this.audit?.emit({ type: 'tool_result', name: toolName, success: false, phase: 'args_parse', error: parseError.slice(0, 200) });
             toolsUsed.push({name: toolName, success: false, error: parseError});
             return {
               role: 'tool' as const,
@@ -1163,19 +1191,20 @@ export class Agent {
             };
           }
 
+          const toolStartTime = Date.now();
           try {
-            const toolStartTime = Date.now();
-
             verboseToolCall(toolName, args);
 
             // Emit tool start event
             this.emitToolStart(toolName, args);
+            this.audit?.emit({ type: 'tool_call', iteration: iterations, name: toolName, args_digest: AuditLogger.digest(args) });
 
             const result = await tool.execute(args, this.toolContext);
             const toolDuration = Date.now() - toolStartTime;
 
             // Emit tool complete event
             this.emitToolComplete(toolName, result, toolDuration);
+            this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: true, duration_ms: toolDuration, result_bytes: result?.length ?? 0 });
 
             if (isMultiple) {
               this.log(chalk.gray(`  │    ${chalk.green('✓')} ${toolName}`));
@@ -1198,6 +1227,7 @@ export class Agent {
 
             // Emit tool error event
             this.emitToolError(toolName, errorMsg);
+            this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, duration_ms: Date.now() - toolStartTime, error: errorMsg.slice(0, 200) });
 
             this.log(chalk.gray(`  │ ${errorIcon} ${toolName} failed: ${errorMsg}`));
             toolsUsed.push({name: toolName, success: false, error: errorMsg, args});

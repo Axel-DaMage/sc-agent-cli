@@ -41,6 +41,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--audit-log <path>', 'Append a JSONL audit event per LLM call and tool execution (headless forensics)')
   .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
   .option('--summary-file <path>', 'Write the JSON run manifest to this file on exit (headless mode)')
   .option('--output-file <path>', 'Alias of --summary-file (headless mode)')
@@ -215,6 +216,7 @@ program
         quiet: options.quiet || outputFormat === 'json',
         clearHistory: options.clear,
         permissionMode: permMode,
+        auditLog: options.auditLog,
         livelockThreshold,
         summaryFile: options.summaryFile,
         outputFile: options.outputFile,
