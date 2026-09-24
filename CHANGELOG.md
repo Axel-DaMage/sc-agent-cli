@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🐛 Fixed
 
+- **`scc doctor` no longer false-fails on admin-protected `/models`:** gateways that require elevated auth for `GET /models` while accepting the inference key on `POST /chat/completions` (e.g. OmniRoute) made doctor report `FAIL auth rejected` on a fully working setup. On a 401/403 from `/models`, doctor now runs a real `max_tokens: 1` completion probe — PASS if inference accepts auth, FAIL only when the inference endpoint also rejects it, WARN when inconclusive or no key is configured. (Fixes #441)
+
 - **Harmony-format tool calls no longer end the turn silently:** some OpenAI-compatible providers emit tool invocations as `<|channel|>commentary to=functions.X<|message|>{args}` markup inside `content` instead of structured `tool_calls`. The agent now recovers named blocks into real tool calls, re-prompts (max 2) on unrecoverable markup, and aborts with a clear error if the model persists — instead of reporting success with zero changes. (Fixes #417)
 
 - **Malformed tool-call arguments no longer crash the agent run:** `JSON.parse(toolCall.function.arguments)` was evaluated once inside `try` and again inside `catch`, so a model emitting invalid JSON (truncated stream, bad escaping — common with smaller/local models) made the rejection escape through `Promise.all` and kill the entire run. Arguments are now parsed once up front; malformed JSON returns a normal tool-error result so the model can self-correct. In headless runs (`sc chat -yq`) a single bad tool call previously meant full-run failure with zero changes produced. (Fixes #406)
