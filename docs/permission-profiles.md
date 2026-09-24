@@ -373,6 +373,24 @@ Typical uses: preventing pushes/merges in agent-driven workers, blocking destruc
 
 ---
 
+## Git Mutation Lock: `denyGitMutation` / `--no-commit`
+
+For orchestrators that own git state externally (ai-sdlc workers, Hermes), `permissions.denyGitMutation` is a **non-interactive hard block** on every git-mutating operation — applied in every permission mode, including `-y`/`autoApprove`.
+
+```json
+{ "permissions": { "denyGitMutation": true } }
+```
+
+Or per invocation: `scc chat -yq --no-commit 'implement issue #42'`.
+
+**Blocked:** `git` tool `add`/`commit` operations; `run_shell` invocations of `git add|commit|push|pull|checkout|switch|restore|reset|rebase|merge|cherry-pick|revert|stash|tag <args>|branch <args>|clone|init|fetch|clean|mv|rm|am|apply|submodule|worktree` (including inside `cd x && git …` chains).
+
+**Still allowed:** read-only git (`status`, `diff`, `log`, `show`, `git branch`/`git tag` with no extra args) and all non-git tools — the model stays in edit-only mode.
+
+Denied calls return a clear "git is managed externally" error so the model proceeds without retrying git operations.
+
+---
+
 ## Troubleshooting
 
 ### Too many prompts in Blacklist mode

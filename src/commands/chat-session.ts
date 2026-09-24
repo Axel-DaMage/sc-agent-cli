@@ -7,7 +7,7 @@ const { version: packageVersion } = require('../../package.json') as { version: 
 import { stdin as input, stdout as output } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { Agent } from '../core/agent.js';
 import type { AgentOptions } from '../core/agent.js';
@@ -15,6 +15,7 @@ import type { Message } from '../core/types.js';
 import { loadConfig } from '../core/config.js';
 import { clearSessionPermissions } from '../utils/permissions.js';
 import { checkStorageLimit, enforceStorageLimit, formatBytes } from '../utils/storage-limit.js';
+import { estimateCost } from '../utils/token-tracker.js';
 import { getModelProfileEmptyStateGuidance } from './chat-session-guidance.js';
 import { getStorageGuidance } from '../utils/storage-guidance.js';
 import { statusBar, getShortcutsBar } from '../utils/status-bar.js';
@@ -422,7 +423,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     .replace(/[^0-9]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-  const sessionId = `${safeWsPath}-${timestamp}`;
+  const sessionId = options.sessionId || `${safeWsPath}-${timestamp}`;
   options = { ...options, sessionId };
 
   verbose(`Session initialized: ${sessionId}`);
@@ -442,6 +443,10 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     }
   }
 
+  // Tools that mutate the workspace. A run that never calls one of these
+  // produced zero filesystem changes (pure read/plan/refusal).
+  const MUTATING_TOOLS = ['write_file', 'edit_file', 'git'];
+
   // Helper to write machine-readable status for automation
   function saveSessionStatus(status: string, error?: string, historyMsgs?: Message[]) {
     try {
@@ -449,10 +454,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       if (!existsSync(sessionDir)) {
         mkdirSync(sessionDir, { recursive: true });
       }
-      const changedTools = ['write_file', 'edit_file', 'git'];
       const hasChanges = historyMsgs?.some(m =>
         m.role === 'assistant' &&
-        m.tool_calls?.some(tc => changedTools.includes(tc.function.name))
+        m.tool_calls?.some(tc => MUTATING_TOOLS.includes(tc.function.name))
       ) ?? false;
       const statusData: Record<string, unknown> = {
         status,
@@ -492,6 +496,19 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     // Start fresh
   }
 
+  // --resume: replace history with the checkpoint's and annotate (#402).
+  // The note uses role 'user': a system message after restored history
+  // trips the message validator (system must lead the conversation).
+  if (options.resumeCheckpoint) {
+    const cp = options.resumeCheckpoint;
+    history = JSON.parse(JSON.stringify(cp.history));
+    const { formatResumeContext } = await import('./resume-command.js');
+    history.push({ role: 'user', content: `[system note]\n${formatResumeContext(cp)}` });
+    if (!options.quiet) {
+      console.log(chalk.green(`\n✓ Resumed session ${cp.sessionId} from ${new Date(cp.timestamp).toLocaleString()} (${cp.history.length} messages, ${cp.iterations} iterations)\n`));
+    }
+  }
+
   // Load saved permissions (needed for banner display)
   let savedPerms: { mode: string; restoreOnStart: boolean } | undefined;
   if (options.autoApprove === undefined) {
@@ -510,8 +527,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   const configDir = join(homedir(), '.sc-agent');
   const storageInfo = checkStorageLimit(configDir);
 
-  // Non-interactive mode: skip UI decorations if quiet flag is set
-  const isQuiet = options.quiet || false;
+  // Non-interactive mode: skip UI decorations if quiet flag is set.
+  // --output-format json implies quiet: the manifest is the only stdout output.
+  const isQuiet = options.quiet || options.outputFormat === 'json';
   const isNonInteractive = Boolean(options.initialPrompt);
 
   if (!isQuiet) {
@@ -645,6 +663,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`\n${boxHeader('Assistant')}`));
     }
 
+    const batchStart = Date.now();
     let agentError: Error | undefined;
     try {
       history = await agent.run(userInput, history);
@@ -682,6 +701,42 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`  🆔 ${sessionId}\n`));
     }
 
+    // #415/#399: machine-readable run manifest — emitted as the LAST stdout
+    // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
+    // With `--output-format json` it is the ONLY stdout write.
+    const emitUsageSummary = (exitReason: 'success' | 'error' | 'no_changes' | 'budget_exceeded') => {
+      const usage = agent.tokenTracker.getUsage();
+      const stats = agent.getStats();
+      const lastAssistant = [...history].reverse().find(
+        m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0
+      );
+      const checkpointPath = join(homedir(), '.sc-agent', 'checkpoints', `${sessionId}.json`);
+      const summary = {
+        v: 1,
+        success: exitReason === 'success',
+        model: currentConfig.model.model,
+        tokens_in: usage.inputTokens,
+        tokens_out: usage.outputTokens,
+        estimated_cost_usd: estimateCost(currentConfig.model.model, usage.inputTokens, usage.outputTokens),
+        tool_calls: agent.getToolCallCounts(),
+        tool_calls_total: stats.toolRunCount,
+        iterations: stats.iterations,
+        duration_ms: Date.now() - batchStart,
+        exit_reason: exitReason,
+        final_message: lastAssistant ? String(lastAssistant.content).slice(0, 4000) : null,
+        checkpoint: existsSync(checkpointPath) ? checkpointPath : null,
+      };
+      for (const outPath of [options.summaryFile, options.outputFile]) {
+        if (!outPath) continue;
+        try {
+          writeFileSync(resolve(outPath), JSON.stringify(summary, null, 2));
+        } catch (e) {
+          verboseError(`manifest write failed (${outPath}): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      console.log(JSON.stringify(summary));
+    };
+
     // Save session trace (always, even on error)
     saveSessionTrace(history);
     verboseSession(sessionId, history.length);
@@ -691,6 +746,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       const errorMsg = agentError instanceof Error ? agentError.message : String(agentError);
       saveSessionStatus('error', errorMsg, history);
       verboseError(`Agent run failed: ${errorMsg}`);
+      emitUsageSummary('error');
       throw agentError;
     }
 
@@ -712,11 +768,41 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       saveSessionStatus('no_changes', undefined, history);
       const noMeaningfulMsg = 'No meaningful response generated. The model may not support this prompt length or format.';
       verboseError(noMeaningfulMsg);
+      emitUsageSummary('no_changes');
       throw new Error(noMeaningfulMsg);
+    }
+
+    // Budget exhaustion: run stopped early but gracefully — emit a
+    // machine-greppable marker + distinct exit code (22 per #409 sketch),
+    // preserving the partial-work summary instead of a SIGKILL.
+    const budgetExceeded = agent.getStats().budgetExceeded;
+    if (budgetExceeded) {
+      saveSessionStatus('budget_exceeded', `budget:${budgetExceeded}`, history);
+      console.log(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
+      process.exitCode = 22;
+      emitUsageSummary('budget_exceeded');
+      return;
+    }
+
+    // Zero-mutation signal: run completed but never called a mutating tool
+    // (model refused, answered read-only, or only ran inspections). Emit a
+    // machine-greppable marker as the last stdout line and exit with the
+    // documented no-changes code (10) — still a clean exit, caller decides.
+    const hasMutations = history.some(m =>
+      m.role === 'assistant' &&
+      m.tool_calls?.some(tc => MUTATING_TOOLS.includes(tc.function.name))
+    );
+    if (!hasMutations) {
+      saveSessionStatus('no_changes', undefined, history);
+      console.log('SCC_NO_CHANGES');
+      process.exitCode = 10;
+      emitUsageSummary('no_changes');
+      return;
     }
 
     // Success — write status and exit
     saveSessionStatus('success', undefined, history);
+    emitUsageSummary('success');
     return;
   }
 
@@ -969,7 +1055,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           } else {
             history = JSON.parse(JSON.stringify(cp.history));
             const resumeMsg = formatResumeContext(cp);
-            history.push({ role: 'system', content: resumeMsg });
+            history.push({ role: 'user', content: `[system note]\n${resumeMsg}` });
             console.log(chalk.green(`\n✓ Resumed session from ${new Date(cp.timestamp).toLocaleString()} (${cp.history.length} messages restored)\n`));
           }
         } catch (err: unknown) {
