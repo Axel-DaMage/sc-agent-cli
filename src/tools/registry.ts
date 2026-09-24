@@ -29,3 +29,19 @@ export const ALL_TOOLS: Tool[] = [
 export function getToolByName(name: string): Tool | undefined {
   return ALL_TOOLS.find((t) => t.definition.function.name === name);
 }
+
+/**
+ * Merge external plugin tools into the registry (#400). Name collisions
+ * with built-ins or other plugins are skipped with a warning — plugin
+ * tools can never shadow core tools.
+ */
+export function registerPluginTools(tools: Tool[]): void {
+  for (const tool of tools) {
+    const name = tool.definition.function.name;
+    if (ALL_TOOLS.some((t) => t.definition.function.name === name)) {
+      console.error(`⚠️  Plugin tool "${name}" conflicts with an existing tool — skipped.`);
+      continue;
+    }
+    ALL_TOOLS.push(tool);
+  }
+}

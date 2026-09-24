@@ -64,6 +64,7 @@ export interface ProjectConfig {
   };
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
+  plugins?: string[]; // External tool modules to load (paths or package specifiers)
   settings?: {
     hud?: boolean; // Show HUD status line after responses (default: true)
     hudFields?: string[]; // Fields to show in HUD: model, profile, memories, messages, storage, permissions, tokens, iterations, cost

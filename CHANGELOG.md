@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **External tool plugins**: `plugins` config key (`~/.sc-agent/config.json` or `.sc-agent.json`) loads `Tool[]` modules at startup via explicit path/package specifiers — no directory scan. Plugin tools join the schema after built-ins, flow through the existing permission system (require approval unless `autoApprove`/`-y`), and can never shadow core tools. Load failures warn and skip. See `docs/plugin-tools.md`. (Closes #400)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
