@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **Exit-code contract**: batch runs now exit with documented, machine-consumable codes — `0` success, `1` generic, `10` zero-mutation (`SCC_NO_CHANGES`), `20` provider error, `21` auth error, `22` budget exhausted (`SC_BUDGET_EXCEEDED`), `23` agent-loop abort (`[SC_LIVELOCK]`). Agent errors are classified automatically; the contract is documented in `docs/non-interactive-mode.md` and stable across releases. (Closes #409)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
