@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **MCP client**: `mcp.servers` config key spawns stdio MCP servers at session start and exposes their tools as `mcp__<server>__<tool>` — full JSON-RPC 2.0 handshake, per-request timeouts, crash isolation (a dead server degrades to per-call errors, never kills the loop), and cleanup on exit. See `docs/mcp-servers.md`. (Closes #401)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed

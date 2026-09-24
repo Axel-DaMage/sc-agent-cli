@@ -140,6 +140,15 @@ program
         permMode = options.permissions as 'ask_once' | 'always_ask' | 'unlimited';
       }
 
+      // MCP servers (#401): connect stdio servers and register their tools
+      // as mcp__<server>__<tool>. Failure isolates per-server.
+      if (config.mcp?.servers && Object.keys(config.mcp.servers).length > 0) {
+        const { connectMcpServers, shutdownMcpServers } = await import('./mcp/server-tools.js');
+        const { registerPluginTools } = await import('./tools/registry.js');
+        registerPluginTools(await connectMcpServers(config.mcp.servers));
+        process.on('exit', shutdownMcpServers);
+      }
+
       await startChatSession({
         workspaceRoot: process.cwd(),
         config,
