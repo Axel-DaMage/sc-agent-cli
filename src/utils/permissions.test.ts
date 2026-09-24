@@ -88,6 +88,63 @@ test('requestPermission throws on denied command even with autoApprove', async (
   );
 });
 
+test('denyGitMutation blocks git tool add/commit', async () => {
+  const config: ProjectConfig = {
+    ...baseConfig,
+    permissions: { ...baseConfig.permissions, denyGitMutation: true, autoApprove: ['git'] },
+  };
+  await assert.rejects(
+    requestPermission({ toolName: 'git', args: { operation: 'commit', message: 'x' }, config, autoApprove: true }),
+    /git commit denied/
+  );
+  await assert.rejects(
+    requestPermission({ toolName: 'git', args: { operation: 'add' }, config }),
+    /git add denied/
+  );
+});
+
+test('denyGitMutation allows read-only git tool ops', async () => {
+  const config: ProjectConfig = {
+    ...baseConfig,
+    permissions: { ...baseConfig.permissions, denyGitMutation: true, autoApprove: ['git'] },
+  };
+  assert.equal(await requestPermission({ toolName: 'git', args: { operation: 'status' }, config }), true);
+  assert.equal(await requestPermission({ toolName: 'git', args: { operation: 'diff' }, config }), true);
+  assert.equal(await requestPermission({ toolName: 'git', args: { operation: 'branch' }, config }), true);
+});
+
+test('denyGitMutation blocks git-mutating shell commands even with autoApprove', async () => {
+  const config: ProjectConfig = {
+    ...baseConfig,
+    permissions: { ...baseConfig.permissions, denyGitMutation: true },
+  };
+  for (const cmd of ['git commit -m x', 'cd repo && git push origin main', 'git checkout -b feat', 'git switch main', 'git branch -d old', 'git tag v1']) {
+    await assert.rejects(
+      requestPermission({ toolName: 'run_shell', args: { command: cmd }, config, autoApprove: true }),
+      /denied.*managed externally/s
+    );
+  }
+});
+
+test('denyGitMutation allows read-only shell commands', async () => {
+  const config: ProjectConfig = {
+    ...baseConfig,
+    permissions: { ...baseConfig.permissions, denyGitMutation: true, autoApprove: ['run_shell'] },
+  };
+  for (const cmd of ['git status', 'git diff --stat', 'git log --oneline', 'git branch', 'git tag', 'ls -la', 'npm test']) {
+    assert.equal(await requestPermission({ toolName: 'run_shell', args: { command: cmd }, config }), true, cmd);
+  }
+});
+
+test('denyGitMutation off: git commands unaffected', async () => {
+  const config: ProjectConfig = {
+    ...baseConfig,
+    permissions: { ...baseConfig.permissions, autoApprove: ['run_shell', 'git'] },
+  };
+  assert.equal(await requestPermission({ toolName: 'run_shell', args: { command: 'git push' }, config }), true);
+  assert.equal(await requestPermission({ toolName: 'git', args: { operation: 'commit', message: 'x' }, config }), true);
+});
+
 test('requestPermission allows non-denied run_shell command', async () => {
   const config: ProjectConfig = {
     ...baseConfig,
