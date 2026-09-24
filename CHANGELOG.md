@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`scc doctor`**: preflight diagnostics for headless/automation setups — validates config files parse, effective config schema, active profile resolution (with `--profile`/`SC_PROFILE` override warnings), API-key presence, provider endpoint reachability + auth via a cheap `/models` ping, and prints the effective permission set with flag-override warnings. Exits non-zero on any FAIL with per-item remediation. (Closes #411)
 
+- **`--prompt-file <path>`**: read the chat prompt from a file (or `-` for stdin) instead of the `[prompt]` argument. Eliminates shell quoting/escaping pitfalls and ARG_MAX limits for large prompts in automation. Mutually exclusive with the prompt argument; errors on missing or empty files. (Closes #413)
 
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
