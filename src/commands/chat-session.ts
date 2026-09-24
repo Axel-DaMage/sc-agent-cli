@@ -422,7 +422,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     .replace(/[^0-9]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-  const sessionId = `${safeWsPath}-${timestamp}`;
+  const sessionId = options.sessionId || `${safeWsPath}-${timestamp}`;
   options = { ...options, sessionId };
 
   verbose(`Session initialized: ${sessionId}`);
@@ -490,6 +490,17 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     }
   } catch {
     // Start fresh
+  }
+
+  // --resume: replace history with the checkpoint's and annotate (#402)
+  if (options.resumeCheckpoint) {
+    const cp = options.resumeCheckpoint;
+    history = JSON.parse(JSON.stringify(cp.history));
+    const { formatResumeContext } = await import('./resume-command.js');
+    history.push({ role: 'system', content: formatResumeContext(cp) });
+    if (!options.quiet) {
+      console.log(chalk.green(`\n✓ Resumed session ${cp.sessionId} from ${new Date(cp.timestamp).toLocaleString()} (${cp.history.length} messages, ${cp.iterations} iterations)\n`));
+    }
   }
 
   // Load saved permissions (needed for banner display)

@@ -37,6 +37,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--resume [ref]', 'Resume a checkpoint: session id, .json path, or "latest" (default when flag is bare)')
   .action(async (prompt: string | undefined, options) => {
     try {
       // Count -v flags from raw argv
@@ -130,6 +131,17 @@ program
         config.model.timeout = parsed;
       }
 
+      // --resume: resolve checkpoint ref (latest | sessionId | .json path)
+      let resumeCheckpoint;
+      if (options.resume !== undefined) {
+        const { resolveCheckpointRef } = await import('./commands/resume-command.js');
+        resumeCheckpoint = resolveCheckpointRef(options.resume, process.cwd());
+        if (!resumeCheckpoint) {
+          console.error(chalk.red(`Error: no checkpoint found for "${options.resume === true ? 'latest' : options.resume}" in this workspace`));
+          process.exit(1);
+        }
+      }
+
       // Permissions mode mapping
       let permMode: 'ask_once' | 'always_ask' | 'unlimited' | undefined = options.yes ? 'unlimited' : undefined;
       if (options.permissions) {
@@ -148,6 +160,8 @@ program
         quiet: options.quiet,
         clearHistory: options.clear,
         permissionMode: permMode,
+        sessionId: resumeCheckpoint?.sessionId,
+        resumeCheckpoint,
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);

@@ -336,3 +336,16 @@ $ sc -q "analyze entire codebase" | head -20
 - ✅ Added `-q, --quiet` flag for minimal output
 - ✅ Auto-exit after processing single prompt
 - ✅ Compatible with all existing flags (`-y`)
+
+---
+
+## Resuming a Checkpoint
+
+```bash
+sc chat -yq --resume latest "CI failed on test X, fix it"
+sc chat -yq --resume <sessionId> "continue"
+sc chat -yq --resume ~/.sc-agent/checkpoints/<id>.json "…"
+```
+
+Restores the checkpoint's conversation history and reuses its session id (checkpoints keep saving under the same id, so remediation runs stay chainable). `--resume` with no value resolves the latest checkpoint for the current workspace.
+

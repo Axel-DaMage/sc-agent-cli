@@ -696,6 +696,7 @@ export interface AgentOptions {
   clearHistory?: boolean;
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
+  resumeCheckpoint?: import('../utils/checkpoint.js').CheckpointData;
 }
 
 export class Agent {

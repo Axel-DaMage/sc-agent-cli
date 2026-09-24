@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **`--resume [ref]`**: resume a checkpoint by session id, `.json` path, or `latest` (default when bare) — restores conversation history and session id so remediation flows continue the same agent session instead of restarting from zero. Works in interactive and `-q` batch modes; errors clearly when the ref resolves to nothing. (Closes #402)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
