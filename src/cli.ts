@@ -11,6 +11,7 @@ import { loadConfig, initConfig, getGlobalConfigPath } from './core/config.js';
 import { startChatSession } from './commands/chat-session.js';
 import { listProfiles, addProfile, useProfile, removeProfile } from './commands/profile.js';
 import { initProject } from './commands/init-command.js';
+import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
 
@@ -180,6 +181,16 @@ program
       console.error(chalk.red(`Error: ${errorMsg}`));
       process.exit(1);
     }
+  });
+
+// Doctor: preflight diagnostics for headless/automation use
+program
+  .command('doctor')
+  .description('Diagnose config, provider connectivity, API key, and effective permissions')
+  .option('-m, --profile <profile>', 'Check a specific profile as if passed to chat')
+  .option('--permissions <mode>', 'Check a permissions override as if passed to chat')
+  .action(async (options) => {
+    await runDoctor(options);
   });
 
 // Profile management
