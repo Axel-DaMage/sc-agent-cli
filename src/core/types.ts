@@ -65,6 +65,14 @@ export interface ProjectConfig {
   };
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
+  mcp?: {
+    servers?: Record<string, {
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      timeoutMs?: number; // per-request timeout (default 30000)
+    }>;
+  }; // MCP servers to consume as tool providers (stdio transport)
   plugins?: string[]; // External tool modules to load (paths or package specifiers)
   settings?: {
     hud?: boolean; // Show HUD status line after responses (default: true)
