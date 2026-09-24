@@ -14,6 +14,7 @@ import { initProject } from './commands/init-command.js';
 import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
+import { classifyError } from './utils/exit-codes.js';
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('../package.json') as { version: string };
@@ -203,7 +204,7 @@ program
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Error: ${errorMsg}`));
-      process.exit(1);
+      process.exit(classifyError(err));
     }
   });
 
