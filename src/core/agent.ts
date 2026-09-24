@@ -696,6 +696,7 @@ export interface AgentOptions {
   clearHistory?: boolean;
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
+  livelockThreshold?: number;
   summaryFile?: string;
   outputFile?: string;
   /** 'json' suppresses all human stdout (banner, streamed answer) — the run
@@ -885,6 +886,8 @@ export class Agent {
     const MAX_SELF_HEAL = 10;
     let emptyResponseCount = 0;
     let totalEmptyResponses = 0;
+    let consecutiveNoToolResponses = 0;
+    const livelockLimit = this.options.livelockThreshold ?? (this.options.autoApprove ? 3 : 0);
     let harmonyRepromptCount = 0;
     const MAX_HARMONY_REPROMPTS = 2;
     let forceToolChoice = false;
@@ -1105,6 +1108,7 @@ export class Agent {
 
       // Handle tool calls if any - PARALLEL EXECUTION
       if (response.tool_calls && response.tool_calls.length > 0) {
+        consecutiveNoToolResponses = 0;
         this.log(chalk.gray(`\n${boxHeader('Tools', 2)}`));
 
         const isMultiple = response.tool_calls.length > 1;
@@ -1263,6 +1267,20 @@ export class Agent {
         // No tool calls — check if LLM is reporting errors without fixing them
         const content = response.content || '';
         const hasToolRun = toolsUsed.length > 0;
+
+        // Tool livelock detection: N consecutive non-empty responses without
+        // tool calls means the model narrates instead of acting. A single
+        // text response is fine (legit final answer ends the loop at 1) —
+        // only a streak reaching the threshold is a livelock.
+        consecutiveNoToolResponses++;
+        if (livelockLimit > 0 && consecutiveNoToolResponses >= livelockLimit) {
+          const lastOutput = content.trim().slice(0, 300);
+          throw new Error(
+            `[SC_LIVELOCK] Model produced ${consecutiveNoToolResponses} consecutive responses ` +
+            `without tool calls in ${iterations} iterations — aborting run (tool livelock). ` +
+            `Last model output: "${lastOutput}"`
+          );
+        }
 
         // Skip self-heal for purely conversational responses (greetings, clarifications, etc.)
         // But NOT if they also include concrete future actions

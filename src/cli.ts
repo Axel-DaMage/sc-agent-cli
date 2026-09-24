@@ -41,6 +41,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
   .option('--summary-file <path>', 'Write the JSON run manifest to this file on exit (headless mode)')
   .option('--output-file <path>', 'Alias of --summary-file (headless mode)')
   .option('--output-format <format>', 'Batch stdout format: "text" (default) or "json" (manifest only)')
@@ -165,6 +166,15 @@ program
         config.model.timeout = parsed;
       }
 
+      let livelockThreshold: number | undefined;
+      if (options.livelockThreshold !== undefined) {
+        livelockThreshold = parseInt(options.livelockThreshold, 10);
+        if (isNaN(livelockThreshold) || livelockThreshold < 0) {
+          console.error(chalk.red(`Error: --livelock-threshold must be a non-negative integer`));
+          process.exit(1);
+        }
+      }
+
       // --no-commit: orchestrators own git state — hard-block mutations in-session
       if (options.commit === false) {
         config.permissions = { ...config.permissions, denyGitMutation: true };
@@ -205,6 +215,7 @@ program
         quiet: options.quiet || outputFormat === 'json',
         clearHistory: options.clear,
         permissionMode: permMode,
+        livelockThreshold,
         summaryFile: options.summaryFile,
         outputFile: options.outputFile,
         outputFormat,
