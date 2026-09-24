@@ -696,6 +696,7 @@ export interface AgentOptions {
   clearHistory?: boolean;
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
+  summaryFile?: string;
 }
 
 export class Agent {
@@ -709,6 +710,7 @@ export class Agent {
   public tokenTracker: TokenTracker;
   private _iterations: number = 0;
   private _toolRunCount: number = 0;
+  private _toolCallCounts = new Map<string, number>();
   private _lastCheckpointIteration: number = 0;
   private _sessionId: string = '';
 
@@ -734,6 +736,11 @@ export class Agent {
 
   getStats(): { iterations: number; toolRunCount: number; sessionId: string } {
     return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId };
+  }
+
+  /** Per-tool invocation counts for the current session (#415 usage summary). */
+  getToolCallCounts(): Record<string, number> {
+    return Object.fromEntries(this._toolCallCounts);
   }
 
   /**
@@ -1052,6 +1059,7 @@ export class Agent {
     const executeTool = async (toolCall: NonNullable<typeof response.tool_calls>[number]) => {
       this._toolRunCount++;
           const toolName = toolCall.function.name;
+          this._toolCallCounts.set(toolName, (this._toolCallCounts.get(toolName) || 0) + 1);
           const tool = getToolByName(toolName);
 
           if (!tool) {

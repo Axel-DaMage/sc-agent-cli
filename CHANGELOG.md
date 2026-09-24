@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **Headless usage summary**: in batch mode (`sc chat <prompt>`), a single-line JSON summary is emitted as the last stdout line on success, error, and no-changes exits — `{v, model, tokens_in, tokens_out, tool_calls{name:count}, tool_calls_total, iterations, duration_ms, exit_reason}`. `--summary-file <path>` also writes it to disk. Feeds per-run cost accounting in automation. (Closes #415)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed

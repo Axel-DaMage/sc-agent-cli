@@ -7,7 +7,7 @@ const { version: packageVersion } = require('../../package.json') as { version: 
 import { stdin as input, stdout as output } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { Agent } from '../core/agent.js';
 import type { AgentOptions } from '../core/agent.js';
@@ -645,6 +645,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`\n${boxHeader('Assistant')}`));
     }
 
+    const batchStart = Date.now();
     let agentError: Error | undefined;
     try {
       history = await agent.run(userInput, history);
@@ -682,6 +683,32 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`  🆔 ${sessionId}\n`));
     }
 
+    // #415: machine-readable usage summary — emitted as the LAST stdout write
+    // in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
+    const emitUsageSummary = (exitReason: 'success' | 'error' | 'no_changes') => {
+      const usage = agent.tokenTracker.getUsage();
+      const stats = agent.getStats();
+      const summary = {
+        v: 1,
+        model: currentConfig.model.model,
+        tokens_in: usage.inputTokens,
+        tokens_out: usage.outputTokens,
+        tool_calls: agent.getToolCallCounts(),
+        tool_calls_total: stats.toolRunCount,
+        iterations: stats.iterations,
+        duration_ms: Date.now() - batchStart,
+        exit_reason: exitReason,
+      };
+      if (options.summaryFile) {
+        try {
+          writeFileSync(resolve(options.summaryFile), JSON.stringify(summary, null, 2));
+        } catch (e) {
+          verboseError(`--summary-file write failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      console.log(JSON.stringify(summary));
+    };
+
     // Save session trace (always, even on error)
     saveSessionTrace(history);
     verboseSession(sessionId, history.length);
@@ -691,6 +718,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       const errorMsg = agentError instanceof Error ? agentError.message : String(agentError);
       saveSessionStatus('error', errorMsg, history);
       verboseError(`Agent run failed: ${errorMsg}`);
+      emitUsageSummary('error');
       throw agentError;
     }
 
@@ -712,11 +740,13 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       saveSessionStatus('no_changes', undefined, history);
       const noMeaningfulMsg = 'No meaningful response generated. The model may not support this prompt length or format.';
       verboseError(noMeaningfulMsg);
+      emitUsageSummary('no_changes');
       throw new Error(noMeaningfulMsg);
     }
 
     // Success — write status and exit
     saveSessionStatus('success', undefined, history);
+    emitUsageSummary('success');
     return;
   }
 

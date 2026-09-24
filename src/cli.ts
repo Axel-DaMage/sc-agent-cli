@@ -37,6 +37,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--summary-file <path>', 'Write the JSON run-usage summary to this file on exit (headless mode)')
   .action(async (prompt: string | undefined, options) => {
     try {
       // Count -v flags from raw argv
@@ -148,6 +149,7 @@ program
         quiet: options.quiet,
         clearHistory: options.clear,
         permissionMode: permMode,
+        summaryFile: options.summaryFile,
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
