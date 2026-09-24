@@ -5,10 +5,13 @@ import chalk from 'chalk';
 // Force color support for markdown rendering and UI
 if (chalk.level < 2) chalk.level = 2;
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig, initConfig, getGlobalConfigPath } from './core/config.js';
 import { startChatSession } from './commands/chat-session.js';
 import { listProfiles, addProfile, useProfile, removeProfile } from './commands/profile.js';
 import { initProject } from './commands/init-command.js';
+import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
 
@@ -40,8 +43,33 @@ program
   .option('--max-steps <n>', 'Stop gracefully after N tool executions (env: SC_MAX_STEPS)')
   .option('--max-seconds <n>', 'Stop gracefully after N seconds of wall-clock time (env: SC_MAX_SECONDS)')
   .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
+  .option('--no-commit', 'Hard-block git mutations inside the session (for orchestrators that own git state)')
+  .option('--prompt-file <path>', 'Read the prompt from a file (use "-" to read from stdin). Mutually exclusive with the prompt argument.')
   .action(async (prompt: string | undefined, options) => {
     try {
+      // --prompt-file: load the prompt from a file instead of argv (#413).
+      // Large prompts passed as argv hit shell quoting/escaping issues and
+      // ARG_MAX limits; a file (or stdin) avoids both.
+      if (options.promptFile !== undefined) {
+        if (prompt !== undefined) {
+          console.error(chalk.red('Error: cannot combine a [prompt] argument with --prompt-file'));
+          process.exit(1);
+        }
+        try {
+          prompt = options.promptFile === '-'
+            ? readFileSync(0, 'utf-8')
+            : readFileSync(resolve(options.promptFile), 'utf-8');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`Error: cannot read prompt file "${options.promptFile}": ${msg}`));
+          process.exit(1);
+        }
+        if (!prompt.trim()) {
+          console.error(chalk.red(`Error: prompt file "${options.promptFile}" is empty`));
+          process.exit(1);
+        }
+      }
+
       // Count -v flags from raw argv
       const verboseCount = (() => {
         let count = 0;
@@ -133,6 +161,11 @@ program
         config.model.timeout = parsed;
       }
 
+      // --no-commit: orchestrators own git state — hard-block mutations in-session
+      if (options.commit === false) {
+        config.permissions = { ...config.permissions, denyGitMutation: true };
+      }
+
       // Permissions mode mapping
       let permMode: 'ask_once' | 'always_ask' | 'unlimited' | undefined = options.yes ? 'unlimited' : undefined;
       if (options.permissions) {
@@ -172,6 +205,16 @@ program
       console.error(chalk.red(`Error: ${errorMsg}`));
       process.exit(1);
     }
+  });
+
+// Doctor: preflight diagnostics for headless/automation use
+program
+  .command('doctor')
+  .description('Diagnose config, provider connectivity, API key, and effective permissions')
+  .option('-m, --profile <profile>', 'Check a specific profile as if passed to chat')
+  .option('--permissions <mode>', 'Check a permissions override as if passed to chat')
+  .action(async (options) => {
+    await runDoctor(options);
   });
 
 // Profile management

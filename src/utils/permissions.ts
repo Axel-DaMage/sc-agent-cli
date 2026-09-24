@@ -46,6 +46,34 @@ export function matchDenyCommand(command: string, patterns: string[]): string | 
   return null;
 }
 
+// Git subcommands that mutate refs/index/worktree when run via run_shell.
+// Listing forms (`git branch`, `git tag` with no extra args) stay allowed.
+const GIT_MUTATING_SUBCOMMANDS = new Set([
+  'add', 'am', 'apply', 'checkout', 'cherry-pick', 'clean', 'clone', 'commit',
+  'fetch', 'init', 'merge', 'mv', 'pull', 'push', 'rebase', 'reset', 'restore',
+  'revert', 'rm', 'stash', 'submodule', 'switch', 'worktree',
+]);
+const GIT_ARG_MUTATING_SUBCOMMANDS = new Set(['branch', 'tag']);
+
+// Detect git-mutating invocations inside a shell command string.
+// Finds every `git <subcmd>` occurrence (covers `cd x && git commit` chains);
+// `git branch`/`git tag` only count as mutating when followed by more args.
+export function isGitMutatingCommand(command: string): string | null {
+  const gitRe = /\bgit\s+((?:-[A-Za-z]\s+\S+\s+)*)([a-z-]+)([^;&|]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = gitRe.exec(command)) !== null) {
+    const sub = m[2];
+    const rest = (m[3] || '').trim();
+    if (GIT_MUTATING_SUBCOMMANDS.has(sub)) return `git ${sub}`;
+    if (GIT_ARG_MUTATING_SUBCOMMANDS.has(sub) && rest.length > 0) return `git ${sub}`;
+  }
+  return null;
+}
+
+const GIT_MUTATION_DENIED =
+  'Git mutations are managed externally (--no-commit / permissions.denyGitMutation). ' +
+  'Make filesystem edits only — do not run git add/commit/checkout/push or any git-mutating command.';
+
 export async function requestPermission(ctx: PermissionContext): Promise<boolean> {
   // Hard deny first: permissions.denyCommands is a non-interactive blocklist
   // that applies to run_shell in every mode — including -y/autoApprove.
@@ -57,6 +85,24 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
         `Command denied by permissions.denyCommands rule "${denied}": ${command}\n` +
         `This is a hard block — adjust the deny list in your config to allow it.`
       );
+    }
+  }
+
+  // Hard deny: permissions.denyGitMutation blocks git-mutating operations in
+  // every mode — orchestrators (ai-sdlc workers) own git state externally.
+  if (ctx.config.permissions?.denyGitMutation) {
+    if (ctx.toolName === 'git') {
+      const op = (ctx.args.operation as string) || '';
+      if (op === 'add' || op === 'commit') {
+        throw new Error(`git ${op} denied. ${GIT_MUTATION_DENIED}`);
+      }
+    }
+    if (ctx.toolName === 'run_shell') {
+      const command = (ctx.args.command as string) || '';
+      const gitOp = isGitMutatingCommand(command);
+      if (gitOp) {
+        throw new Error(`${gitOp} denied. ${GIT_MUTATION_DENIED}`);
+      }
     }
   }
 

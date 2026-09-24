@@ -874,6 +874,8 @@ export class Agent {
     const MAX_SELF_HEAL = 10;
     let emptyResponseCount = 0;
     let totalEmptyResponses = 0;
+    let harmonyRepromptCount = 0;
+    const MAX_HARMONY_REPROMPTS = 2;
     let forceToolChoice = false;
     const toolsUsed: Array<{name: string; success: boolean; error?: string; args?: Record<string, unknown>}> = [];
 
@@ -1052,6 +1054,42 @@ export class Agent {
         emptyResponseCount = 0; // Reset consecutive empty responses counter
         this.provider.setConsecutiveEmpty(0);
         this.provider.setLastCallWasError(false);
+      }
+
+      // Recover Harmony-format tool calls leaked into `content` (#417): some
+      // providers emit "<|channel|>commentary to=functions.X<|message|>{args}"
+      // as plain text instead of structured tool_calls, which would otherwise
+      // end the turn silently with zero changes.
+      const noStructuredCalls = !response.tool_calls || response.tool_calls.length === 0;
+      if (noStructuredCalls && typeof response.content === 'string' && response.content.includes('<|channel|>')) {
+        const { recoverHarmonyToolCalls, hasHarmonyMarkup } = await import('../utils/harmony-format.js');
+        if (hasHarmonyMarkup(response.content)) {
+          const recovered = recoverHarmonyToolCalls(response.content);
+          if (recovered.length > 0) {
+            response.tool_calls = recovered;
+            assistantMessage.tool_calls = recovered;
+            if (!this.options.quiet) {
+              this.log(chalk.yellow(`\n  │ ♻️  Recovered ${recovered.length} tool call(s) from Harmony markup in content`));
+            }
+          } else {
+            harmonyRepromptCount++;
+            if (harmonyRepromptCount <= MAX_HARMONY_REPROMPTS) {
+              messages.push({
+                role: 'user',
+                content: `[MALFORMED TOOL CALL ${harmonyRepromptCount}/${MAX_HARMONY_REPROMPTS}] Your previous message embedded a tool call as Harmony markup ("<|channel|>...<|message|>") inside content instead of a structured tool call. Re-emit the intended action using the proper tool_calls field. Do NOT output <|channel|> markup.`,
+              });
+              if (!this.options.quiet) {
+                this.log(chalk.yellow(`\n  │ 🔄 Harmony markup detected in content — re-prompting (${harmonyRepromptCount}/${MAX_HARMONY_REPROMPTS})...`));
+              }
+              continue;
+            }
+            throw new Error(
+              `Model emitted Harmony markup tool calls inside content ${harmonyRepromptCount} times instead of structured tool_calls. ` +
+              'This indicates a provider/model format incompatibility — try a different model, ' +
+              'lower temperature (0.2-0.3), or disabling streaming (stream: false).'
+            );
+          }
+        }
       }
 
       // Handle tool calls if any - PARALLEL EXECUTION
