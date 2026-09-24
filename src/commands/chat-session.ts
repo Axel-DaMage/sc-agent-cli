@@ -15,6 +15,7 @@ import type { Message } from '../core/types.js';
 import { loadConfig } from '../core/config.js';
 import { clearSessionPermissions } from '../utils/permissions.js';
 import { checkStorageLimit, enforceStorageLimit, formatBytes } from '../utils/storage-limit.js';
+import { estimateCost } from '../utils/token-tracker.js';
 import { getModelProfileEmptyStateGuidance } from './chat-session-guidance.js';
 import { getStorageGuidance } from '../utils/storage-guidance.js';
 import { statusBar, getShortcutsBar } from '../utils/status-bar.js';
@@ -510,8 +511,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   const configDir = join(homedir(), '.sc-agent');
   const storageInfo = checkStorageLimit(configDir);
 
-  // Non-interactive mode: skip UI decorations if quiet flag is set
-  const isQuiet = options.quiet || false;
+  // Non-interactive mode: skip UI decorations if quiet flag is set.
+  // --output-format json implies quiet: the manifest is the only stdout output.
+  const isQuiet = options.quiet || options.outputFormat === 'json';
   const isNonInteractive = Boolean(options.initialPrompt);
 
   if (!isQuiet) {
@@ -683,27 +685,37 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`  🆔 ${sessionId}\n`));
     }
 
-    // #415: machine-readable usage summary — emitted as the LAST stdout write
-    // in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
+    // #415/#399: machine-readable run manifest — emitted as the LAST stdout
+    // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
+    // With `--output-format json` it is the ONLY stdout write.
     const emitUsageSummary = (exitReason: 'success' | 'error' | 'no_changes') => {
       const usage = agent.tokenTracker.getUsage();
       const stats = agent.getStats();
+      const lastAssistant = [...history].reverse().find(
+        m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0
+      );
+      const checkpointPath = join(homedir(), '.sc-agent', 'checkpoints', `${sessionId}.json`);
       const summary = {
         v: 1,
+        success: exitReason === 'success',
         model: currentConfig.model.model,
         tokens_in: usage.inputTokens,
         tokens_out: usage.outputTokens,
+        estimated_cost_usd: estimateCost(currentConfig.model.model, usage.inputTokens, usage.outputTokens),
         tool_calls: agent.getToolCallCounts(),
         tool_calls_total: stats.toolRunCount,
         iterations: stats.iterations,
         duration_ms: Date.now() - batchStart,
         exit_reason: exitReason,
+        final_message: lastAssistant ? String(lastAssistant.content).slice(0, 4000) : null,
+        checkpoint: existsSync(checkpointPath) ? checkpointPath : null,
       };
-      if (options.summaryFile) {
+      for (const outPath of [options.summaryFile, options.outputFile]) {
+        if (!outPath) continue;
         try {
-          writeFileSync(resolve(options.summaryFile), JSON.stringify(summary, null, 2));
+          writeFileSync(resolve(outPath), JSON.stringify(summary, null, 2));
         } catch (e) {
-          verboseError(`--summary-file write failed: ${e instanceof Error ? e.message : String(e)}`);
+          verboseError(`manifest write failed (${outPath}): ${e instanceof Error ? e.message : String(e)}`);
         }
       }
       console.log(JSON.stringify(summary));

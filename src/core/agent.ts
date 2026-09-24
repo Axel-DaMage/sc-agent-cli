@@ -697,6 +697,10 @@ export interface AgentOptions {
   permissionMode?: 'ask_once' | 'always_ask' | 'unlimited';
   sessionId?: string;
   summaryFile?: string;
+  outputFile?: string;
+  /** 'json' suppresses all human stdout (banner, streamed answer) — the run
+   *  manifest JSON line is the only stdout output. */
+  outputFormat?: 'text' | 'json';
 }
 
 export class Agent {
@@ -1358,6 +1362,8 @@ export class Agent {
 
   private onStreamChunk(delta: StreamDelta): void {
     if (delta.content) {
+      // JSON headless mode: the manifest carries final_message — keep stdout clean
+      if (this.options.outputFormat === 'json') return;
       // Clear thinking indicator on first content
       if (this._thinkingShown) {
         // ANSI: erase entire line, carriage return

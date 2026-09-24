@@ -128,6 +128,27 @@ sc -yq "run npm test and report results"
 | `-y, --yes` | Auto-approve all tool executions | Automation, trusted environments |
 | `-q, --quiet` | Suppress UI decorations | Piping output, logging |
 | `-yq` | Combined: auto-approve + quiet | Fully automated scripts |
+| `--output-format json` | Emit *only* the JSON run manifest on stdout | Machine consumers (CI workers, dashboards) |
+| `--summary-file <path>` / `--output-file <path>` | Also write the manifest to a file | Artifact collection, cost accounting |
+
+---
+
+## Run Manifest (JSON)
+
+In batch mode, the last stdout line is always a single-line JSON manifest — parse with `tail -1 | jq`. With `--output-format json` it is the *only* stdout output (the model's streamed answer is suppressed and carried in `final_message`).
+
+```bash
+sc chat -yq --output-format json --output-file run.json "add input validation"
+```
+
+```json
+{"v":1,"success":true,"model":"gpt-4o","tokens_in":41230,"tokens_out":3180,
+ "estimated_cost_usd":0.1284,"tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},
+ "tool_calls_total":10,"iterations":14,"duration_ms":84210,"exit_reason":"success",
+ "final_message":"Added zod validation to ...","checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json"}
+```
+
+`exit_reason` is one of `success | error | no_changes`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, and no-changes.
 
 ---
 

@@ -37,7 +37,9 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
-  .option('--summary-file <path>', 'Write the JSON run-usage summary to this file on exit (headless mode)')
+  .option('--summary-file <path>', 'Write the JSON run manifest to this file on exit (headless mode)')
+  .option('--output-file <path>', 'Alias of --summary-file (headless mode)')
+  .option('--output-format <format>', 'Batch stdout format: "text" (default) or "json" (manifest only)')
   .action(async (prompt: string | undefined, options) => {
     try {
       // Count -v flags from raw argv
@@ -141,15 +143,23 @@ program
         permMode = options.permissions as 'ask_once' | 'always_ask' | 'unlimited';
       }
 
+      const outputFormat = options.outputFormat ?? 'text';
+      if (outputFormat !== 'text' && outputFormat !== 'json') {
+        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
+        process.exit(1);
+      }
+
       await startChatSession({
         workspaceRoot: process.cwd(),
         config,
         autoApprove: permMode === 'unlimited',
         initialPrompt: prompt,
-        quiet: options.quiet,
+        quiet: options.quiet || outputFormat === 'json',
         clearHistory: options.clear,
         permissionMode: permMode,
         summaryFile: options.summaryFile,
+        outputFile: options.outputFile,
+        outputFormat,
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
