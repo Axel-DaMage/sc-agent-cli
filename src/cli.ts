@@ -37,6 +37,9 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--max-steps <n>', 'Stop gracefully after N tool executions (env: SC_MAX_STEPS)')
+  .option('--max-seconds <n>', 'Stop gracefully after N seconds of wall-clock time (env: SC_MAX_SECONDS)')
+  .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
   .action(async (prompt: string | undefined, options) => {
     try {
       // Count -v flags from raw argv
@@ -140,6 +143,18 @@ program
         permMode = options.permissions as 'ask_once' | 'always_ask' | 'unlimited';
       }
 
+      // Execution budgets: flag > env var; must be positive integers
+      const budgetOpt = (flag: string | undefined, env: string | undefined, name: string): number | undefined => {
+        const raw = flag ?? env;
+        if (raw === undefined) return undefined;
+        const n = parseInt(raw, 10);
+        if (isNaN(n) || n <= 0) {
+          console.error(chalk.red(`Error: ${name} must be a positive integer`));
+          process.exit(1);
+        }
+        return n;
+      };
+
       await startChatSession({
         workspaceRoot: process.cwd(),
         config,
@@ -148,6 +163,9 @@ program
         quiet: options.quiet,
         clearHistory: options.clear,
         permissionMode: permMode,
+        maxSteps: budgetOpt(options.maxSteps, process.env.SC_MAX_STEPS, '--max-steps'),
+        maxSeconds: budgetOpt(options.maxSeconds, process.env.SC_MAX_SECONDS, '--max-seconds'),
+        maxTotalTokens: budgetOpt(options.maxTotalTokens, process.env.SC_MAX_TOTAL_TOKENS, '--max-total-tokens'),
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);

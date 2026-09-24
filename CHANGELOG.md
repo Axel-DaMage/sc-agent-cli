@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **Execution budgets**: `--max-steps <n>` (tool executions), `--max-seconds <n>` (wall clock), `--max-total-tokens <n>` (estimated session tokens; `--max-tokens` stays the per-response cap) — env equivalents `SC_MAX_STEPS`/`SC_MAX_SECONDS`/`SC_MAX_TOTAL_TOKENS`. On exhaustion the run ends gracefully (no external SIGKILL), prints `SC_BUDGET_EXCEEDED <kind>` and exits with code 22 with the partial-work summary preserved. Defaults keep unbounded behavior. (Closes #408)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
