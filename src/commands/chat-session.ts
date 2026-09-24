@@ -442,6 +442,10 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     }
   }
 
+  // Tools that mutate the workspace. A run that never calls one of these
+  // produced zero filesystem changes (pure read/plan/refusal).
+  const MUTATING_TOOLS = ['write_file', 'edit_file', 'git'];
+
   // Helper to write machine-readable status for automation
   function saveSessionStatus(status: string, error?: string, historyMsgs?: Message[]) {
     try {
@@ -449,10 +453,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       if (!existsSync(sessionDir)) {
         mkdirSync(sessionDir, { recursive: true });
       }
-      const changedTools = ['write_file', 'edit_file', 'git'];
       const hasChanges = historyMsgs?.some(m =>
         m.role === 'assistant' &&
-        m.tool_calls?.some(tc => changedTools.includes(tc.function.name))
+        m.tool_calls?.some(tc => MUTATING_TOOLS.includes(tc.function.name))
       ) ?? false;
       const statusData: Record<string, unknown> = {
         status,
@@ -713,6 +716,21 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       const noMeaningfulMsg = 'No meaningful response generated. The model may not support this prompt length or format.';
       verboseError(noMeaningfulMsg);
       throw new Error(noMeaningfulMsg);
+    }
+
+    // Zero-mutation signal: run completed but never called a mutating tool
+    // (model refused, answered read-only, or only ran inspections). Emit a
+    // machine-greppable marker as the last stdout line and exit with the
+    // documented no-changes code (10) — still a clean exit, caller decides.
+    const hasMutations = history.some(m =>
+      m.role === 'assistant' &&
+      m.tool_calls?.some(tc => MUTATING_TOOLS.includes(tc.function.name))
+    );
+    if (!hasMutations) {
+      saveSessionStatus('no_changes', undefined, history);
+      console.log('SCC_NO_CHANGES');
+      process.exitCode = 10;
+      return;
     }
 
     // Success — write status and exit
