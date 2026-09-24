@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **`--prompt-file <path>`**: read the chat prompt from a file (or `-` for stdin) instead of the `[prompt]` argument. Eliminates shell quoting/escaping pitfalls and ARG_MAX limits for large prompts in automation. Mutually exclusive with the prompt argument; errors on missing or empty files. (Closes #413)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
