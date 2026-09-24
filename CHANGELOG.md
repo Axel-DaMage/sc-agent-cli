@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+- **`--no-commit` / `permissions.denyGitMutation`**: hard-block all git-mutating operations inside a session — `git` tool `add`/`commit` and `run_shell` git-mutating subcommands (commit/push/checkout/switch/reset/rebase/merge/tag-with-args/…) are denied with a clear "git is managed externally" error, in every permission mode including `-y`. Read-only git stays available. For orchestrators (ai-sdlc workers, Hermes) that own git state externally — makes the violation impossible instead of detectable. (Closes #414)
+
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
 ### 🐛 Fixed
