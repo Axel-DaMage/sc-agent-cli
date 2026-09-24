@@ -423,7 +423,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     .replace(/[^0-9]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-  const sessionId = `${safeWsPath}-${timestamp}`;
+  const sessionId = options.sessionId || `${safeWsPath}-${timestamp}`;
   options = { ...options, sessionId };
 
   verbose(`Session initialized: ${sessionId}`);
@@ -494,6 +494,19 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     }
   } catch {
     // Start fresh
+  }
+
+  // --resume: replace history with the checkpoint's and annotate (#402).
+  // The note uses role 'user': a system message after restored history
+  // trips the message validator (system must lead the conversation).
+  if (options.resumeCheckpoint) {
+    const cp = options.resumeCheckpoint;
+    history = JSON.parse(JSON.stringify(cp.history));
+    const { formatResumeContext } = await import('./resume-command.js');
+    history.push({ role: 'user', content: `[system note]\n${formatResumeContext(cp)}` });
+    if (!options.quiet) {
+      console.log(chalk.green(`\n✓ Resumed session ${cp.sessionId} from ${new Date(cp.timestamp).toLocaleString()} (${cp.history.length} messages, ${cp.iterations} iterations)\n`));
+    }
   }
 
   // Load saved permissions (needed for banner display)
@@ -1042,7 +1055,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           } else {
             history = JSON.parse(JSON.stringify(cp.history));
             const resumeMsg = formatResumeContext(cp);
-            history.push({ role: 'system', content: resumeMsg });
+            history.push({ role: 'user', content: `[system note]\n${resumeMsg}` });
             console.log(chalk.green(`\n✓ Resumed session from ${new Date(cp.timestamp).toLocaleString()} (${cp.history.length} messages restored)\n`));
           }
         } catch (err: unknown) {
