@@ -43,6 +43,55 @@ export interface ModelConfig {
   timeout?: number; // Connection timeout in ms (overrides provider default)
 }
 
+/**
+ * Provider failure taxonomy for the failover contract (#425).
+ * Every error thrown by the provider layer carries one of these classes so
+ * retry, cascade, and exit-code decisions never depend on message sniffing.
+ */
+export type ProviderFailureClass =
+  | 'rate_limit'  // HTTP 429 — retryable, cascade-eligible
+  | 'server'      // HTTP 5xx — retryable, cascade-eligible
+  | 'timeout'     // request deadline exceeded — retryable, cascade-eligible
+  | 'network'     // transport failure (DNS, refused, reset) — retryable, cascade-eligible
+  | 'auth'        // 401/403 — never retried; cascades only when configured
+  | 'client'      // other 4xx — deterministic request error, never retried
+  | 'aborted'     // caller cancellation — never retried, never cascaded
+  | 'unknown';    // unclassified — retried within a provider, not cascaded
+
+/** Bounded retry policy applied per provider before the cascade advances (#425). */
+export interface RetryPolicyConfig {
+  /** Retries after the first attempt, per provider (default 2). */
+  maxRetries?: number;
+  /** Delay before the first retry in ms (default 1000). */
+  baseDelayMs?: number;
+  /** Exponential multiplier applied per retry (default 2). */
+  backoffMultiplier?: number;
+  /** Upper bound for a single backoff delay in ms (default 30000). */
+  maxDelayMs?: number;
+}
+
+/**
+ * One failover cascade entry: a profile name (resolved against
+ * `config.profiles`) or inline `ModelConfig` overrides merged over `model.*`.
+ */
+export type FailoverTarget = string | Partial<ModelConfig>;
+
+/**
+ * Provider failover contract (#425): every request has a timeout, transient
+ * failures retry with bounded backoff, and persistent failures advance an
+ * ordered provider/model cascade.
+ */
+export interface FailoverConfig {
+  /** Ordered fallback chain tried when the active provider fails with a
+   *  cascade-eligible error (see `cascadeOn`). */
+  cascade?: FailoverTarget[];
+  /** Bounded retry policy applied per provider before moving on. */
+  retry?: RetryPolicyConfig;
+  /** Failure classes that advance the cascade
+   *  (default: rate_limit, server, timeout, network). */
+  cascadeOn?: ProviderFailureClass[];
+}
+
 export type PermissionProfile = 'traditional' | 'blacklist';
 
 export interface ThrottleConfig {
@@ -65,6 +114,7 @@ export interface ProjectConfig {
   };
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
+  failover?: FailoverConfig; // Provider failover contract: timeouts, bounded retries, cascade (#425)
   mcp?: {
     servers?: Record<string, {
       command: string;

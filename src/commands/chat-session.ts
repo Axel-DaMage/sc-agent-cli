@@ -677,6 +677,20 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       } else if (/fetch|network|timeout|abort|econnrefused|econnreset|api_error|5\d{2}/i.test(errorMsg)) {
         errorCode = 'api_error';
       }
+      // Structured failure class from the failover contract (#425) wins over
+      // message sniffing when the provider layer attached one; cascade
+      // attempts carry the per-provider forensic trail.
+      const failureClass = (err as { failureClass?: string }).failureClass;
+      const cascadeAttempts = (err as { attempts?: unknown }).attempts;
+      const metadata: Record<string, unknown> = {
+        error: errorMsg,
+        error_code: failureClass || errorCode,
+        model: currentConfig.model.model,
+        provider: currentConfig.model.provider,
+        prompt_tokens_estimated: Math.ceil(userInput.length / 4),
+      };
+      if (failureClass) metadata.failure_class = failureClass;
+      if (cascadeAttempts) metadata.cascade_attempts = cascadeAttempts;
       // Build minimal history with user message + error entry
       history = [
         ...history,
@@ -685,13 +699,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           role: 'assistant',
           content: '',
           timestamp: new Date().toISOString(),
-          metadata: {
-            error: errorMsg,
-            error_code: errorCode,
-            model: currentConfig.model.model,
-            provider: currentConfig.model.provider,
-            prompt_tokens_estimated: Math.ceil(userInput.length / 4),
-          },
+          metadata,
         },
       ];
     }
@@ -700,6 +708,18 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`${boxFooter()}\n`));
       console.log(chalk.gray(`  🆔 ${sessionId}\n`));
     }
+
+    // #425: structured failure report for the manifest — failure class and
+    // the ordered cascade attempt log (per-provider class/model/message).
+    const buildErrorInfo = (err: Error): Record<string, unknown> => {
+      const info: Record<string, unknown> = {
+        message: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+        class: (err as { failureClass?: string }).failureClass ?? 'unknown',
+      };
+      const attempts = (err as { attempts?: unknown }).attempts;
+      if (attempts) info.attempts = attempts;
+      return info;
+    };
 
     // #415/#399: machine-readable run manifest — emitted as the LAST stdout
     // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
@@ -715,6 +735,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         v: 1,
         success: exitReason === 'success',
         model: currentConfig.model.model,
+        // Model that actually served the last request — differs from `model`
+        // after a failover hop (#425).
+        active_model: agent.getActiveModel(),
         tokens_in: usage.inputTokens,
         tokens_out: usage.outputTokens,
         estimated_cost_usd: estimateCost(currentConfig.model.model, usage.inputTokens, usage.outputTokens),
@@ -725,6 +748,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         exit_reason: exitReason,
         final_message: lastAssistant ? String(lastAssistant.content).slice(0, 4000) : null,
         checkpoint: existsSync(checkpointPath) ? checkpointPath : null,
+        ...(agentError ? { error: buildErrorInfo(agentError) } : {}),
       };
       for (const outPath of [options.summaryFile, options.outputFile]) {
         if (!outPath) continue;

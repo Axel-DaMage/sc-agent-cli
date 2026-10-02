@@ -119,6 +119,16 @@ export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
     config.model.model = envModel;
   }
 
+  // Ordered failover cascade from env (#425): comma-separated profile names,
+  // e.g. SC_FAILOVER="nvidia,ollama". Overrides failover.cascade from files.
+  const envFailover = process.env.SC_FAILOVER;
+  if (envFailover) {
+    const names = envFailover.split(',').map(s => s.trim()).filter(Boolean);
+    if (names.length > 0) {
+      config.failover = { ...config.failover, cascade: names };
+    }
+  }
+
   // Override policy file from environment variable
   const envPolicyFile = process.env.SC_POLICY_FILE;
   if (envPolicyFile) {
@@ -156,6 +166,31 @@ export function validateConfig(config: ProjectConfig): void {
       `${missingApiKeyRule.providerName} API requires an API key. ` +
       `Set model.apiKey in config, ${missingApiKeyRule.envVar}, or SC_API_KEY.`
     );
+  }
+
+  // Failover cascade (#425): every entry must resolve to a usable provider —
+  // a profile name or inline overrides that yield a valid baseUrl + model.
+  const cascade = config.failover?.cascade ?? [];
+  for (const [i, target] of cascade.entries()) {
+    const overrides = typeof target === 'string' ? config.profiles?.[target] : target;
+    if (!overrides) {
+      throw new Error(
+        `failover.cascade[${i}] references unknown profile "${String(target)}". ` +
+        `Define it under "profiles" or use an inline { baseUrl, model } entry.`
+      );
+    }
+    const merged = { ...config.model, ...overrides };
+    if (!merged.baseUrl || !merged.model) {
+      throw new Error(
+        `failover.cascade[${i}] must resolve to a baseUrl and model ` +
+        `(profile name or inline { baseUrl, model }).`
+      );
+    }
+    try {
+      new URL(merged.baseUrl);
+    } catch {
+      throw new Error(`failover.cascade[${i}] has invalid baseUrl: "${merged.baseUrl}" is not a valid URL`);
+    }
   }
 }
 

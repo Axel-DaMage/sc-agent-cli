@@ -9,6 +9,25 @@
     "maxTokens": 4096,
     "stream": true
   },
+  "profiles": {
+    "openai-backup": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "<YOUR_OPENAI_KEY>",
+      "model": "gpt-4o-mini"
+    }
+  },
+  "failover": {
+    "cascade": [
+      "openai-backup",
+      { "baseUrl": "http://localhost:1234/v1", "model": "lmstudio-model" }
+    ],
+    "retry": {
+      "maxRetries": 2,
+      "baseDelayMs": 1000,
+      "backoffMultiplier": 2,
+      "maxDelayMs": 30000
+    }
+  },
   "permissions": {
     "autoApprove": [
       "read_file",

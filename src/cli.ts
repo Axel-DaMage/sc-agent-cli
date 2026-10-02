@@ -7,7 +7,7 @@ if (chalk.level < 2) chalk.level = 2;
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { loadConfig, initConfig, getGlobalConfigPath } from './core/config.js';
+import { loadConfig, initConfig, getGlobalConfigPath, validateConfig } from './core/config.js';
 import { startChatSession } from './commands/chat-session.js';
 import { listProfiles, addProfile, useProfile, removeProfile } from './commands/profile.js';
 import { initProject } from './commands/init-command.js';
@@ -42,6 +42,7 @@ program
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
   .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--fallback <profiles>', 'Ordered provider failover cascade: comma-separated profile names (e.g. --fallback nvidia,ollama). Overrides config failover.cascade.')
   .option('--resume [ref]', 'Resume a checkpoint: session id, .json path, or "latest" (default when flag is bare)')
   .option('--audit-log <path>', 'Append a JSONL audit event per LLM call and tool execution (headless forensics)')
   .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
@@ -167,6 +168,25 @@ program
           process.exit(1);
         }
         config.model.timeout = parsed;
+      }
+
+      // Apply --fallback override (#425): ordered cascade of profile names.
+      // Re-validated below — a typo'd fallback fails fast at startup, not
+      // as a runtime surprise mid-run.
+      if (options.fallback !== undefined) {
+        const names = String(options.fallback).split(',').map(s => s.trim()).filter(Boolean);
+        if (names.length === 0) {
+          console.error(chalk.red('Error: --fallback requires at least one profile name'));
+          process.exit(1);
+        }
+        config.failover = { ...config.failover, cascade: names };
+        verbose(`Failover cascade: ${names.join(' → ')}`);
+      }
+
+      // Re-validate once all flag overrides are applied — covers
+      // failover.cascade profile refs and resolved baseUrls (#425).
+      if (options.fallback !== undefined) {
+        validateConfig(config);
       }
 
       // --resume: resolve checkpoint ref (latest | sessionId | .json path)

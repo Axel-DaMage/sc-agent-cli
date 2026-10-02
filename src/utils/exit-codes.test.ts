@@ -1,6 +1,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { classifyError, EXIT_CODES } from './exit-codes.js';
+import { ProviderError, ProviderCascadeError } from '../core/provider-error.js';
 
 test('classifyError: auth errors → 21', () => {
   for (const msg of [
@@ -22,9 +23,43 @@ test('classifyError: provider errors → 20', () => {
     'read ECONNRESET',
     'Request failed with status 502',
     'rate limit exceeded',
+    'API Error 429: too many requests',
   ]) {
     assert.equal(classifyError(new Error(msg)), EXIT_CODES.PROVIDER_ERROR, msg);
   }
+});
+
+test('classifyError: structured failureClass beats message sniffing (#425)', () => {
+  // A 400-class message whose structured class is transient → provider error
+  assert.equal(
+    classifyError(new ProviderError('request failed', 'server', 503)),
+    EXIT_CODES.PROVIDER_ERROR
+  );
+  assert.equal(
+    classifyError(new ProviderError('API Error 429: slow down', 'rate_limit', 429)),
+    EXIT_CODES.PROVIDER_ERROR
+  );
+  assert.equal(
+    classifyError(new ProviderError('Connection timed out', 'timeout')),
+    EXIT_CODES.PROVIDER_ERROR
+  );
+  assert.equal(
+    classifyError(new ProviderError('token expired', 'auth', 401)),
+    EXIT_CODES.AUTH_ERROR
+  );
+  // Terminal failure of an exhausted cascade drives the exit code
+  assert.equal(
+    classifyError(new ProviderCascadeError([
+      { label: 'primary', model: 'a', baseUrl: 'http://x/v1', failureClass: 'server', error: 'API Error 503' },
+      { label: 'fallback', model: 'b', baseUrl: 'http://y/v1', failureClass: 'auth', error: 'API Error 401' },
+    ])),
+    EXIT_CODES.AUTH_ERROR
+  );
+  // Non-taxonomy classes fall through to message matching
+  assert.equal(
+    classifyError(new ProviderError('API Error 400: bad request', 'client', 400)),
+    EXIT_CODES.ERROR
+  );
 });
 
 test('classifyError: livelock → 23', () => {

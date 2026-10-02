@@ -66,6 +66,36 @@ test('loadConfig surfaces invalid project config JSON with file path and recover
   );
 });
 
+test('validateConfig rejects unknown profile names in failover.cascade (#425)', () => {
+  const config = createConfig('http://localhost:11434/v1');
+  config.failover = { cascade: ['nonexistent'] };
+  assert.throws(
+    () => validateConfig(config),
+    /failover\.cascade\[0\] references unknown profile "nonexistent"/
+  );
+});
+
+test('validateConfig rejects failover entries that resolve to an invalid baseUrl', () => {
+  const config = createConfig('http://localhost:11434/v1');
+  config.failover = { cascade: [{ baseUrl: 'not-a-url', model: 'x' }] };
+  assert.throws(
+    () => validateConfig(config),
+    /failover\.cascade\[0\] has invalid baseUrl/
+  );
+});
+
+test('validateConfig accepts a well-formed failover cascade', () => {
+  const config = createConfig('http://localhost:11434/v1');
+  config.profiles = {
+    backup: { baseUrl: 'http://localhost:1234/v1', model: 'backup-model' },
+  };
+  config.failover = {
+    cascade: ['backup', { baseUrl: 'http://localhost:9999/v1', model: 'other' }],
+    retry: { maxRetries: 2, baseDelayMs: 500 },
+  };
+  assert.doesNotThrow(() => validateConfig(config));
+});
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

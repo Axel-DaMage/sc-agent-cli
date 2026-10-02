@@ -130,6 +130,7 @@ sc -yq "run npm test and report results"
 | `-yq` | Combined: auto-approve + quiet | Fully automated scripts |
 | `--output-format json` | Emit *only* the JSON run manifest on stdout | Machine consumers (CI workers, dashboards) |
 | `--summary-file <path>` / `--output-file <path>` | Also write the manifest to a file | Artifact collection, cost accounting |
+| `--fallback <profiles>` | Ordered provider failover cascade (comma-separated profile names) | Surviving rate-limits/outages in pipelines |
 
 ---
 
@@ -142,13 +143,13 @@ sc chat -yq --output-format json --output-file run.json "add input validation"
 ```
 
 ```json
-{"v":1,"success":true,"model":"gpt-4o","tokens_in":41230,"tokens_out":3180,
+{"v":1,"success":true,"model":"gpt-4o","active_model":"gpt-4o","tokens_in":41230,"tokens_out":3180,
  "estimated_cost_usd":0.1284,"tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},
  "tool_calls_total":10,"iterations":14,"duration_ms":84210,"exit_reason":"success",
  "final_message":"Added zod validation to ...","checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json"}
 ```
 
-`exit_reason` is one of `success | error | no_changes | budget_exceeded`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), and budget exhaustion (`SC_BUDGET_EXCEEDED`) — always as the last stdout line.
+`exit_reason` is one of `success | error | no_changes | budget_exceeded`. `checkpoint` points to the resumable state file when one exists (see `--resume`). `active_model` reports the model that actually served the last request — it differs from `model` when the failover cascade engaged. On error exits the manifest carries a structured `error` object: `{message, class, attempts?}` where `class` is the failure taxonomy (`auth`, `rate_limit`, `server`, `timeout`, `network`, `client`) and `attempts` lists each provider tried when the cascade was exhausted. The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), and budget exhaustion (`SC_BUDGET_EXCEEDED`) — always as the last stdout line.
 
 ---
 
@@ -395,3 +396,43 @@ case $? in
   22) echo "raise the budget or split the task" ;;
 esac
 ```
+
+## Provider Failover Contract
+
+Autonomous pipelines do not stall on a provider rate-limit or outage. Every
+provider request obeys a three-layer contract:
+
+1. **Timeout** — every request is deadline-bound (`--timeout`, `model.timeout`,
+   or a per-provider default of 30s–5min).
+2. **Bounded retry** — transient failures (HTTP 429, 5xx, timeouts, network
+   errors) retry with exponential backoff. `Retry-After` hints are honored
+   within a bounded cap. Auth (401/403) and client (4xx) errors never retry.
+3. **Cascade** — on persistent failure, the run advances to the next
+   provider/model in an ordered chain. The hop is sticky for the rest of the
+   session. If the chain is exhausted the run fails with a
+   `ProviderCascadeError` whose `attempts` list each provider tried; the exit
+   code follows the terminal failure class (e.g. `20` provider, `21` auth).
+
+Configure the cascade in `~/.sc-agent/config.json` or `.sc-agent.json`:
+
+```json
+"failover": {
+  "cascade": ["nvidia", { "baseUrl": "http://localhost:11434/v1", "model": "llama3.2" }],
+  "retry": { "maxRetries": 2, "baseDelayMs": 1000, "backoffMultiplier": 2, "maxDelayMs": 30000 },
+  "cascadeOn": ["rate_limit", "server", "timeout", "network"]
+}
+```
+
+- `cascade` entries are profile names (resolved from `profiles`) or inline
+  model overrides merged over `model.*`. A fallback on a different host never
+  inherits the primary's API key — it uses its own `apiKey` or the
+  provider-specific env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+  `NVIDIA_API_KEY`).
+- `retry` bounds the per-provider retry budget (defaults: 2 retries, 1s→2s
+  backoff, 30s cap).
+- `cascadeOn` controls which failure classes advance the cascade (default:
+  `rate_limit`, `server`, `timeout`, `network`). Add `"auth"` to also hop on
+  401/403.
+
+Overrides for pipelines: `--fallback nvidia,ollama` (profile names) or the
+`SC_FAILOVER` env var (`SC_FAILOVER="nvidia,ollama"`).

@@ -17,7 +17,9 @@
 
 - **`src/core/types.ts`**: TypeScript type definitions (messages, tools, config)
 - **`src/core/config.ts`**: Configuration loading/saving with profile support
-- **`src/core/provider.ts`**: OpenAI-compatible API client with streaming
+- **`src/core/provider.ts`**: OpenAI-compatible API client with streaming, per-request timeout, bounded retries
+- **`src/core/provider-error.ts`**: Provider failure taxonomy — `ProviderError`/`ProviderCascadeError` with `failureClass`
+- **`src/core/failover.ts`**: Ordered provider/model cascade (`FailoverProvider`) with sticky failover and per-provider retry budgets (#425)
 - **`src/core/agent.ts`**: Main agent loop with parallel tool execution & memory injection
 - **`src/core/project-context.ts`**: Loads project-specific context from `AGENTS.md|CLAUDE.md`
 - **`src/core/message-validator.ts`**: Auto-corrects message sequence errors

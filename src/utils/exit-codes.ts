@@ -25,6 +25,24 @@ export const EXIT_CODES = {
 // patterns are checked before generic provider errors since both can
 // appear in the same message.
 export function classifyError(err: unknown): number {
+  // Structured classification (#425): provider-layer errors carry a
+  // failureClass that maps directly onto the taxonomy — trust it over
+  // message sniffing when present.
+  const failureClass = (err as { failureClass?: unknown } | null | undefined)?.failureClass;
+  if (typeof failureClass === 'string') {
+    switch (failureClass) {
+      case 'auth':
+        return EXIT_CODES.AUTH_ERROR;
+      case 'rate_limit':
+      case 'server':
+      case 'timeout':
+      case 'network':
+        return EXIT_CODES.PROVIDER_ERROR;
+      default:
+        break; // client/aborted/unknown → fall through to message matching
+    }
+  }
+
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 
   if (/\b401\b|\b403\b|unauthorized|forbidden|invalid.{0,12}api.?key|api.?key.{0,12}(invalid|missing|required)|requires?.{0,15}api.?key|authentication/.test(msg)) {
@@ -33,7 +51,7 @@ export function classifyError(err: unknown): number {
   if (/\[sc_livelock\]|tool livelock/.test(msg)) {
     return EXIT_CODES.LOOP_ABORT;
   }
-  if (/empty response|fetch|network|timeout|timed out|econnrefused|econnreset|enotfound|socket hang|api_error|\b5\d\d\b|rate.?limit/.test(msg)) {
+  if (/empty response|fetch|network|timeout|timed out|econnrefused|econnreset|enotfound|socket hang|api_error|\b429\b|\b5\d\d\b|rate.?limit/.test(msg)) {
     return EXIT_CODES.PROVIDER_ERROR;
   }
   return EXIT_CODES.ERROR;

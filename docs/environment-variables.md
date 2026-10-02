@@ -68,6 +68,23 @@ Controls the maximum number of agent iterations before stopping. Each iteration 
 
 ---
 
+### SC_FAILOVER
+
+Ordered provider failover cascade as comma-separated profile names. When the
+active provider fails persistently (rate-limit, 5xx, timeout, network), the
+run fails over to the next entry — see "Provider Failover Contract" in
+[non-interactive-mode.md](non-interactive-mode.md).
+
+```bash
+export SC_FAILOVER="nvidia,ollama"
+scc chat -yq "implement issue #42"
+```
+
+**Default:** unset (single provider, no cascade). Overrides `failover.cascade`
+in config files.
+
+---
+
 ### SC_MAX_STORAGE_GB
 
 Controls the maximum storage in gigabytes for persistent data in `~/.sc-agent/`.

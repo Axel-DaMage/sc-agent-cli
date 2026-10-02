@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import type { Message, ProjectConfig, StreamDelta, AgentCallbacks } from './types.js';
-import { OpenAICompatibleProvider } from './provider.js';
+import { FailoverProvider, resolveCascadeTargets } from './failover.js';
+import type { CascadeAttempt } from './provider-error.js';
 import { loadProjectContext } from './project-context.js';
 import { probeRepo, formatRepoProfileForPrompt } from './repo-probe/index.js';
 import { ALL_TOOLS, getToolByName } from '../tools/registry.js';
@@ -712,7 +713,7 @@ export interface AgentOptions {
 }
 
 export class Agent {
-  private provider: OpenAICompatibleProvider;
+  private provider: FailoverProvider;
   private toolContext: ToolContext;
   private systemPrompt: string;
   private isFirstChunk: boolean = true;
@@ -730,7 +731,25 @@ export class Agent {
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
-    this.provider = new OpenAICompatibleProvider(options.config.model);
+    // Failover contract (#425): primary model + ordered cascade targets, each
+    // with its own bounded retry budget. Single-entry chains degrade to the
+    // pre-cascade single-provider behavior.
+    this.provider = new FailoverProvider(
+      [
+        { label: options.config.activeProfile || 'primary', config: options.config.model },
+        ...resolveCascadeTargets(options.config),
+      ],
+      {
+        retry: options.config.failover?.retry,
+        cascadeOn: options.config.failover?.cascadeOn,
+        onFailover: (from, to, err, failureClass) => {
+          this.log(chalk.yellow(
+            `\n  │ 🔀 Provider failover: ${from.label} → ${to.label} ` +
+            `(${failureClass}: ${err.message.slice(0, 120)})`
+          ));
+        },
+      }
+    );
     const throttle = resolveThrottleConfig(
       options.config.settings?.throttling,
       options.config.model.model,
@@ -762,6 +781,16 @@ export class Agent {
   /** Per-tool invocation counts for the current session (#415 usage summary). */
   getToolCallCounts(): Record<string, number> {
     return Object.fromEntries(this._toolCallCounts);
+  }
+
+  /** Model currently serving requests — differs from config.model.model after a failover hop (#425). */
+  getActiveModel(): string {
+    return this.provider.activeModel;
+  }
+
+  /** Attempt log of the last provider call — non-empty when the cascade engaged (#425). */
+  getFailoverAttempts(): readonly CascadeAttempt[] {
+    return this.provider.lastAttempts;
   }
 
   /**
@@ -988,7 +1017,7 @@ export class Agent {
         reqEstTokens += est;
         this.tokenTracker.addInput(est);
       }
-      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
+      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this.provider.activeModel, messages: messages.length, est_tokens: reqEstTokens });
       const llmStartTime = Date.now();
 
       // Show thinking indicator on first iteration
@@ -1014,7 +1043,7 @@ export class Agent {
         this.provider.setLastCallWasError(false);
       } catch (err) {
         this.provider.setLastCallWasError(true);
-        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
+        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this.provider.activeModel, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
         throw err;
       }
 
@@ -1033,7 +1062,7 @@ export class Agent {
         }
       }
       this.audit?.emit({
-        type: 'llm_response', iteration: iterations, model: this.options.config.model.model,
+        type: 'llm_response', iteration: iterations, model: this.provider.activeModel,
         duration_ms: Date.now() - llmStartTime, status: 'ok',
         content_bytes: response.content?.length ?? 0, tool_calls: response.tool_calls?.length ?? 0,
         est_tokens: resEstTokens,

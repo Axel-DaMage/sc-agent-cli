@@ -60,6 +60,7 @@ export async function showConfig(
   if (envProfile) overrides.push('SC_PROFILE');
   if (envMaxIter) overrides.push('SC_MAX_ITERATIONS');
   if (envMaxStorage) overrides.push('SC_MAX_STORAGE_GB');
+  if (process.env.SC_FAILOVER) overrides.push('SC_FAILOVER');
 
   if (overrides.length > 0) {
     section('Environment Overrides');
@@ -76,6 +77,20 @@ export async function showConfig(
       const label = `${name}${active}`;
       const details = `model: ${p?.model || config.model.model}, provider: ${p?.baseUrl || config.model.baseUrl}`;
       console.log(` ${chalk.cyan(label.padEnd(22))} ${chalk.gray(details)}`);
+    }
+  }
+
+  // ── Failover (#425) ──
+  const cascade = config.failover?.cascade ?? [];
+  if (cascade.length > 0 || config.failover?.retry) {
+    section('Failover');
+    list('Cascade', cascade.map(t => typeof t === 'string' ? t : (t.model ?? 'inline')));
+    const retry = config.failover?.retry;
+    field('Retry policy', retry
+      ? `maxRetries=${retry.maxRetries ?? 2} base=${retry.baseDelayMs ?? 1000}ms ×${retry.backoffMultiplier ?? 2} cap=${retry.maxDelayMs ?? 30000}ms`
+      : 'default (2 retries, 1s→2s, 30s cap)');
+    if (config.failover?.cascadeOn) {
+      list('Cascade on', config.failover.cascadeOn);
     }
   }
 
@@ -140,6 +155,7 @@ export async function showConfig(
   console.log(` ${chalk.white('SC_PROFILE'.padEnd(22))} ${chalk.gray('Active profile name')}`);
   console.log(` ${chalk.white('SC_MAX_ITERATIONS'.padEnd(22))} ${chalk.gray('Max agent loop iterations (default: 100)')}`);
   console.log(` ${chalk.white('SC_MAX_STORAGE_GB'.padEnd(22))} ${chalk.gray('Storage limit in GB (default: 1)')}`);
+  console.log(` ${chalk.white('SC_FAILOVER'.padEnd(22))} ${chalk.gray('Failover cascade, CSV of profile names')}`);
 
   console.log();
 }

@@ -7,8 +7,14 @@ import type {
   ToolCall,
 } from './types.js';
 import { verboseApiRequest, verboseApiResponse, verbose, verboseError } from '../utils/verbose-logger.js';
-import type { ThrottleConfig } from './types.js';
+import type { RetryPolicyConfig, ThrottleConfig } from './types.js';
 import { sleep, calculateDelay } from '../utils/throttle.js';
+import {
+  ProviderError,
+  classifyHttpStatus,
+  classifyProviderError,
+  isRetryableClass,
+} from './provider-error.js';
 
 export interface ChatCompletionOptions {
   messages: Message[];
@@ -23,8 +29,34 @@ export interface ChatCompletionResponse {
   tool_calls?: ToolCall[];
 }
 
-const RETRY_DELAYS = [1000, 2000]; // ms between retry attempts
-const MAX_RETRIES = 2;
+// Bounded retry policy (#425): defaults reproduce the pre-contract behavior
+// (2 retries at 1s and 2s) while remaining fully configurable per provider.
+export interface RetryPolicy {
+  maxRetries: number;
+  baseDelayMs: number;
+  backoffMultiplier: number;
+  maxDelayMs: number;
+}
+
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxRetries: 2,
+  baseDelayMs: 1000,
+  backoffMultiplier: 2,
+  maxDelayMs: 30000,
+};
+
+/** Hard bound for a server-provided Retry-After hint — keeps backoff bounded. */
+const MAX_RETRY_AFTER_MS = 120000;
+
+/** Parse a Retry-After header (delta-seconds or HTTP-date) into ms. */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(header);
+  if (Number.isNaN(date)) return undefined;
+  return Math.max(0, date - Date.now());
+}
 
 const PROVIDER_TIMEOUT_DEFAULTS: Record<string, number> = {
   nvidia: 180000,    // 3 min — NVIDIA API is slow
@@ -49,6 +81,7 @@ export class OpenAICompatibleProvider {
   private throttleConfig: ThrottleConfig = {
     enabled: false, minDelayMs: 0, afterEmptyResponse: 0, afterError: 0, maxDelayMs: 30000, mode: 'fixed',
   };
+  private retryPolicy: RetryPolicy = { ...DEFAULT_RETRY_POLICY };
   private lastApiCallTime = 0;
   private consecutiveEmpty = 0;
   private lastCallWasError = false;
@@ -57,6 +90,16 @@ export class OpenAICompatibleProvider {
 
   setThrottleConfig(config: ThrottleConfig): void {
     this.throttleConfig = config;
+  }
+
+  /** Apply a bounded retry policy (#425). Absent fields keep defaults. */
+  setRetryPolicy(policy: RetryPolicyConfig): void {
+    this.retryPolicy = {
+      maxRetries: Math.max(0, Math.min(policy.maxRetries ?? DEFAULT_RETRY_POLICY.maxRetries, 10)),
+      baseDelayMs: Math.max(0, policy.baseDelayMs ?? DEFAULT_RETRY_POLICY.baseDelayMs),
+      backoffMultiplier: Math.max(1, policy.backoffMultiplier ?? DEFAULT_RETRY_POLICY.backoffMultiplier),
+      maxDelayMs: Math.max(0, policy.maxDelayMs ?? DEFAULT_RETRY_POLICY.maxDelayMs),
+    };
   }
 
   setConsecutiveEmpty(count: number): void {
@@ -105,9 +148,10 @@ export class OpenAICompatibleProvider {
     }
 
     const timeout = getTimeout(this.config.baseUrl, this.config.timeout);
+    const policy = this.retryPolicy;
 
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= policy.maxRetries; attempt++) {
       const abortController = new AbortController();
       const timeoutTimer = setTimeout(() => abortController.abort(new Error('Connection timed out')), timeout);
       let onAbort: (() => void) | null = null;
@@ -157,14 +201,12 @@ export class OpenAICompatibleProvider {
 
         if (!response.ok) {
           const errorText = await response.text();
-          if (response.status === 429 || response.status >= 500) {
-            lastError = new Error(`API Error ${response.status}: ${errorText}`);
-            if (attempt < MAX_RETRIES) {
-              await this.delay(RETRY_DELAYS[attempt]);
-              continue;
-            }
-          }
-          throw new Error(`API Error ${response.status}: ${errorText}`);
+          throw new ProviderError(
+            `API Error ${response.status}: ${errorText}`,
+            classifyHttpStatus(response.status),
+            response.status,
+            parseRetryAfterMs(response.headers?.get?.('retry-after') ?? null)
+          );
         }
 
         if (options.stream && response.body) {
@@ -178,10 +220,11 @@ export class OpenAICompatibleProvider {
 
         if (err instanceof Error) {
           if (options.signal?.aborted) throw err;
-          verboseError(`API call failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}): ${err.message}`);
-          if (attempt >= MAX_RETRIES || this.isNonRetryable(err)) throw err;
+          const failureClass = classifyProviderError(err);
+          verboseError(`API call failed (attempt ${attempt + 1}/${policy.maxRetries + 1}): ${err.message}`);
+          if (attempt >= policy.maxRetries || !isRetryableClass(failureClass)) throw err;
           lastError = err;
-          await this.delay(RETRY_DELAYS[attempt]);
+          await this.delay(this.retryDelayMs(attempt, err), options.signal);
         } else {
           throw err;
         }
@@ -195,19 +238,24 @@ export class OpenAICompatibleProvider {
     throw lastError || new Error('Request failed after retries');
   }
 
-  private isNonRetryable(err: Error): boolean {
-    const msg = err.message.toLowerCase();
-    // 4xx errors (except 429) are client errors — no retry
-    if (/4\d\d/.test(msg) && !msg.includes('429')) return true;
-    // Auth errors
-    if (msg.includes('401') || msg.includes('403') || msg.includes('unauthorized') || msg.includes('forbidden')) return true;
-    // Invalid request
-    if (msg.includes('400') || msg.includes('invalid')) return true;
-    return false;
+  /**
+   * Bounded backoff for retry `attempt` (0-based). Exponential from
+   * `baseDelayMs`, capped at `maxDelayMs`; a server Retry-After hint raises
+   * the delay but stays bounded by MAX_RETRY_AFTER_MS.
+   */
+  private retryDelayMs(attempt: number, err: unknown): number {
+    const backoff = Math.min(
+      this.retryPolicy.baseDelayMs * Math.pow(this.retryPolicy.backoffMultiplier, attempt),
+      this.retryPolicy.maxDelayMs
+    );
+    if (err instanceof ProviderError && err.retryAfterMs !== undefined) {
+      return Math.max(backoff, Math.min(err.retryAfterMs, MAX_RETRY_AFTER_MS));
+    }
+    return backoff;
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  private delay(ms: number, signal?: AbortSignal): Promise<void> {
+    return sleep(ms, signal);
   }
 
   private async handleNonStreamResponse(response: Response): Promise<ChatCompletionResponse> {
