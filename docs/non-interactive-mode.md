@@ -148,7 +148,8 @@ sc chat -yq --output-format json --output-file run.json "add input validation"
  "tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},"tool_calls_total":10,
  "tokens_in":41230,"tokens_out":3180,"estimated_cost_usd":0.1284,
  "duration_ms":84210,"final_message":"Added zod validation to ...",
- "checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json","error":null}
+ "checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json","error":null,
+ "provider":"openai/gpt-4o","resolution":"completed"}
 ```
 
 `exit_reason` is one of `success | error | no_changes | budget_exceeded | interrupted`. `checkpoint` points to the resumable state file when one exists (see `--resume`; `session_id` is also a valid resume ref). `error` carries the failure description on non-success exits, else `null`.
@@ -192,6 +193,24 @@ How it works (all via the [Dev Container CLI](https://github.com/devcontainers/c
 **Fallback — never hard-fails.** If the `devcontainer`/`docker` CLIs are missing, no devcontainer config exists, or `devcontainer up`/`exec` fails for any reason, the run continues on the host and is classified `devcontainer_unavailable` with a `reason` of `no_config | cli_missing | docker_missing | up_failed | exec_failed`. The decision is written to the audit log (`--audit-log`, `type: "devcontainer"` events record the exec path and command) and to the run manifest.
 
 Env knobs: `SC_DEVCONTAINER_AGENT_CMD` overrides the in-container command (default `scc`). `SC_DEVCONTAINER` is set automatically inside the container — do not set it on the host.
+
+Failover contract fields (#425):
+
+- `resolution` — `"completed"` on success; otherwise mirrors `exit_reason`
+- `provider` — `provider/model` label of the failover candidate that served the run (the configured model unless the cascade advanced; see `SC_FAILOVER`)
+- `terminalResolution` — present on error exits; `"provider_error"` when the provider chain was exhausted (exit 24), otherwise mapped from the exit taxonomy (`auth_error`, `loop_abort`, `error`)
+- `errorClass` — failure class of the terminal candidate (`timeout`, `transport`, `rate_limit`, `server_error`, `auth`, `client`)
+- `attempts` — per-candidate attempt log: `[{candidate, attempt, errorClass, retryable, status, error, durationMs}]`
+
+```json
+{"v":1,"success":false,"model":"gpt-4o","provider":null,"resolution":"error",
+ "terminalResolution":"provider_error","errorClass":"rate_limit",
+ "attempts":[{"candidate":"openai/gpt-4o","attempt":4,"errorClass":"rate_limit",
+   "retryable":true,"status":429,"error":"API Error 429: rate limited","durationMs":312},
+   {"candidate":"anthropic/claude-sonnet-4-6","attempt":4,"errorClass":"rate_limit",
+   "retryable":true,"status":429,"error":"API Error 429: rate limited","durationMs":280}],
+ "exit_reason":"error", ...}
+```
 
 ---
 
@@ -426,10 +445,11 @@ Batch runs terminate with a documented exit code — wrappers branch on `$?` alo
 | `21` | Auth error — 401/403, missing or invalid API key | `Error: …` |
 | `22` | Execution budget exhausted (`--max-steps`/`--max-seconds`/`--max-total-tokens`) | `SC_BUDGET_EXCEEDED <steps\|seconds\|tokens>` |
 | `23` | Agent-loop abort — tool livelock (`--livelock-threshold`), unrecoverable loop | `[SC_LIVELOCK] …` |
+| `24` | Provider chain exhausted — every `SC_FAILOVER` candidate failed (manifest carries `errorClass` + `attempts`) | `Error: …` |
 | `130` | Interrupted by `SIGINT` (batch only) | manifest `exit_reason: "interrupted"` |
 | `143` | Interrupted by `SIGTERM` (batch only, e.g. `timeout` kills) | manifest `exit_reason: "interrupted"` |
 
-Reserved: 2-9 clean terminals, 11-19 run outcomes, 24+ fatal. Codes are stable across releases.
+Reserved: 2-9 clean terminals, 11-19 run outcomes, 25+ fatal. Codes are stable across releases.
 
 ```bash
 scc chat -yq --max-steps 50 'implement issue #42'

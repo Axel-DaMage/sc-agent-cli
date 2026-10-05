@@ -17,7 +17,8 @@
 
 - **`src/core/types.ts`**: TypeScript type definitions (messages, tools, config)
 - **`src/core/config.ts`**: Configuration loading/saving with profile support
-- **`src/core/provider.ts`**: OpenAI-compatible API client with streaming
+- **`src/core/provider.ts`**: OpenAI-compatible API client with streaming + failover contract (dual timeouts, bounded retry, provider/model cascade)
+- **`src/core/failover.ts`**: Failover contract — timeout resolution, transient-error classification, backoff, SC_FAILOVER chain resolution, ProviderFailoverError
 - **`src/core/agent.ts`**: Main agent loop with parallel tool execution & memory injection
 - **`src/core/project-context.ts`**: Loads project-specific context from `AGENTS.md|CLAUDE.md`
 - **`src/core/message-validator.ts`**: Auto-corrects message sequence errors

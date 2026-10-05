@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 import { OpenAICompatibleProvider } from './provider.js';
 import type { ModelConfig } from './types.js';
 
+// Real failover classes, fake backoff — tests assert the retry bound,
+// not wall-clock pacing.
+vi.mock('./failover.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./failover.js')>();
+  return { ...mod, computeRetryDelay: () => 1 };
+});
+
 function makeConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
   return {
     provider: 'openai-compatible',

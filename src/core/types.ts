@@ -40,7 +40,7 @@ export interface ModelConfig {
   stream?: boolean;
   top_p?: number;
   topP?: number;
-  timeout?: number; // Connection timeout in ms (overrides provider default)
+  timeout?: number; // Per-attempt total timeout in ms (overrides SC_PROVIDER_ATTEMPT_TIMEOUT_MS; connect bound: SC_PROVIDER_CONNECT_TIMEOUT_MS)
 }
 
 export type PermissionProfile = 'traditional' | 'blacklist';

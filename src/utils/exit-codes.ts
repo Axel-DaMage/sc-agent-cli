@@ -8,8 +8,9 @@
 //   21 auth error                     (401/403, invalid or missing API key)
 //   22 budget exhausted               (SC_BUDGET_EXCEEDED,  #408)
 //   23 agent-loop abort               (tool livelock, malformed-args storm)
+//   24 provider chain exhausted       (failover contract — every candidate failed, #425)
 //
-// Reserved ranges: 2-9 other clean terminals, 11-19 run outcomes, 24+ fatal.
+// Reserved ranges: 2-9 other clean terminals, 11-19 run outcomes, 25+ fatal.
 
 export const EXIT_CODES = {
   SUCCESS: 0,
@@ -19,12 +20,20 @@ export const EXIT_CODES = {
   AUTH_ERROR: 21,
   BUDGET_EXCEEDED: 22,
   LOOP_ABORT: 23,
+  PROVIDER_EXHAUSTED: 24,
 } as const;
 
 // Map an error (message) to a documented exit code. Order matters: auth
 // patterns are checked before generic provider errors since both can
 // appear in the same message.
 export function classifyError(err: unknown): number {
+  // Errors that declare their own contract exit code win (e.g.
+  // ProviderFailoverError → 24 when every cascade candidate was exhausted).
+  if (err && typeof err === 'object' && 'exitCode' in err) {
+    const declared = (err as { exitCode?: unknown }).exitCode;
+    if (typeof declared === 'number' && Number.isInteger(declared)) return declared;
+  }
+
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 
   if (/\b401\b|\b403\b|unauthorized|forbidden|invalid.{0,12}api.?key|api.?key.{0,12}(invalid|missing|required)|requires?.{0,15}api.?key|authentication/.test(msg)) {

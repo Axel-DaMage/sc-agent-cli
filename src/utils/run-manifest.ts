@@ -1,6 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Message } from '../core/types.js';
+import { ProviderFailoverError, type CandidateAttempt } from '../core/failover.js';
+import { EXIT_CODES, classifyError } from './exit-codes.js';
 import type { DevcontainerRunInfo } from '../core/devcontainer.js';
 import { verboseError } from './verbose-logger.js';
 
@@ -21,6 +23,14 @@ export type RunExitReason =
  * every batch run — and the only stdout line under `--output-format json`,
  * where the human transcript and status markers go to stderr.
  */
+// Maps the exit-code taxonomy (#409) to terminalResolution values (#425).
+const TERMINAL_RESOLUTIONS: Record<number, string> = {
+  [EXIT_CODES.PROVIDER_ERROR]: 'provider_error',
+  [EXIT_CODES.PROVIDER_EXHAUSTED]: 'provider_error',
+  [EXIT_CODES.AUTH_ERROR]: 'auth_error',
+  [EXIT_CODES.LOOP_ABORT]: 'loop_abort',
+};
+
 export interface RunManifest {
   /** Manifest schema version. */
   v: 1;
@@ -49,6 +59,15 @@ export interface RunManifest {
   error: string | null;
   /** Devcontainer exec path + in-container marker when `--devcontainer` was requested (#421). */
   devcontainer?: DevcontainerRunInfo;
+  /** "provider/model" failover candidate that served the run (#425). */
+  provider: string | null;
+  /** Terminal resolution for machine consumers: 'completed' on success, else the exit reason. */
+  resolution: string;
+  /** Error classification on failure exits (provider_error|auth_error|loop_abort|error). */
+  terminalResolution?: string;
+  /** ProviderErrorClass + per-candidate attempt trace when the failover chain exhausted. */
+  errorClass?: string;
+  attempts?: CandidateAttempt[];
 }
 
 const FINAL_MESSAGE_MAX = 4000;
@@ -69,6 +88,9 @@ export interface RunManifestInput {
   durationMs: number;
   checkpointPath: string | null;
   devcontainer?: DevcontainerRunInfo;
+  provider?: string | null;
+  /** Raw run error — used to derive terminalResolution/errorClass/attempts. */
+  errorObj?: unknown;
 }
 
 export function buildRunManifest(input: RunManifestInput): RunManifest {
@@ -93,7 +115,17 @@ export function buildRunManifest(input: RunManifestInput): RunManifest {
     checkpoint: input.checkpointPath,
     error: input.error ?? null,
     ...(input.devcontainer ? { devcontainer: input.devcontainer } : {}),
+    provider: input.provider ?? null,
+    resolution: input.exitReason === 'success' ? 'completed' : input.exitReason,
+    ...(input.errorObj ? errorFields(input.errorObj) : {}),
   };
+}
+
+function errorFields(err: unknown): Pick<RunManifest, 'terminalResolution' | 'errorClass' | 'attempts'> {
+  if (err instanceof ProviderFailoverError) {
+    return { terminalResolution: 'provider_error', errorClass: err.errorClass, attempts: err.attempts };
+  }
+  return { terminalResolution: TERMINAL_RESOLUTIONS[classifyError(err)] ?? 'error' };
 }
 
 /**

@@ -1,6 +1,8 @@
 import chalk from 'chalk';
 import type { Message, ProjectConfig, StreamDelta, AgentCallbacks } from './types.js';
 import { OpenAICompatibleProvider } from './provider.js';
+import { resolveFailoverChain } from './failover.js';
+import type { CandidateAttempt } from './failover.js';
 import { loadProjectContext } from './project-context.js';
 import { probeRepo, formatRepoProfileForPrompt } from './repo-probe/index.js';
 import { ALL_TOOLS, getToolByName } from '../tools/registry.js';
@@ -740,6 +742,7 @@ export class Agent {
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
     this.provider = new OpenAICompatibleProvider(options.config.model);
+    this.provider.setFailoverChain(resolveFailoverChain(options.config));
     const throttle = resolveThrottleConfig(
       options.config.settings?.throttling,
       options.config.model.model,
@@ -771,6 +774,16 @@ export class Agent {
   /** Per-tool invocation counts for the current session (#415 usage summary). */
   getToolCallCounts(): Record<string, number> {
     return Object.fromEntries(this._toolCallCounts);
+  }
+
+  /** "provider/model" label of the failover candidate serving this run (#425). */
+  getProviderUsed(): string | null {
+    return this.provider.providerUsed;
+  }
+
+  /** Failed-attempt records from the last provider call (failover manifest). */
+  getFailoverAttempts(): CandidateAttempt[] {
+    return this.provider.failoverAttempts;
   }
 
   /**

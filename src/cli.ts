@@ -42,7 +42,7 @@ program
   .option('-v, --verbose', 'Verbose debug logging (use -v, -vv, -vvv for level)')
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
-  .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--timeout <ms>', 'Per-attempt total timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and SC_PROVIDER_ATTEMPT_TIMEOUT_MS.')
   .option('--resume [ref]', 'Resume a checkpoint: session id, .json path, or "latest" (default when flag is bare)')
   .option('--audit-log <path>', 'Append a JSONL audit event per LLM call and tool execution (headless forensics)')
   .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
