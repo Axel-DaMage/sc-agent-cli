@@ -395,3 +395,12 @@ case $? in
   22) echo "raise the budget or split the task" ;;
 esac
 ```
+
+## Zero-Mutation Completion Guard
+
+In unattended runs (`-y` / `--permissions unlimited`), a prompt that requests workspace changes must not end its turn having executed zero mutating tools. When the model answers with prose only — a narrated plan, a patch pasted as text, or a premature "done" — the agent blocks the turn completion and re-prompts the model to apply the change via `write_file`/`edit_file`/`git`/`run_shell`.
+
+- **Budget:** `SC_ZERO_MUTATION_REPROMPTS` (default `2`; `0` disables the guard).
+- **Worktree check:** the guard also compares git status before/after the run, so writes made through unclassified shell paths still count as mutations and are never re-prompted.
+- **No-change verdict honored:** an explicit verdict ("no changes required", "already implemented", "nothing to commit") completes the turn immediately — `SCC_NO_CHANGES` / exit `10` remains the contract for genuine no-op runs.
+- **Scope:** only mutation-scoped prompts in unattended mode. Interactive sessions and read-only prompts (summarize, explain, list) complete without re-prompting.

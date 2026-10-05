@@ -7,10 +7,13 @@ import { spawnSync } from 'node:child_process';
 import {
   isMutatingShellCommand,
   isMutatingToolCall,
+  isWorkspaceMutatingToolCall,
   countMutatingToolCalls,
   getWorkspaceGitState,
   hasWorktreeChanges,
   detectSessionMutations,
+  expectsWorkspaceMutation,
+  declaresNoChangesNeeded,
 } from './mutation-detector.js';
 import type { Message } from '../core/types.js';
 
@@ -264,6 +267,48 @@ test('detectSessionMutations accurately detects mutations from tool history and 
   assert.equal(res3.hasMutations, true);
   assert.equal(res3.mutatingToolCalls, 1);
   assert.equal(res3.worktreeChanged, true);
+});
+
+test('isWorkspaceMutatingToolCall excludes memory_write from workspace mutations (#448)', () => {
+  assert.equal(isWorkspaceMutatingToolCall('write_file', { path: 'a.txt', content: 'x' }), true);
+  assert.equal(isWorkspaceMutatingToolCall('edit_file', { path: 'a.txt', patch: 'x' }), true);
+  assert.equal(isWorkspaceMutatingToolCall('git', { operation: 'commit' }), true);
+  assert.equal(isWorkspaceMutatingToolCall('run_shell', { command: 'echo x > f.txt' }), true);
+
+  // memory_write mutates ~/.sc-agent, not the workspace
+  assert.equal(isWorkspaceMutatingToolCall('memory_write', { key: 'k', content: 'v' }), false);
+
+  assert.equal(isWorkspaceMutatingToolCall('read_file', { path: 'a.txt' }), false);
+  assert.equal(isWorkspaceMutatingToolCall('git', { operation: 'status' }), false);
+});
+
+test('expectsWorkspaceMutation detects mutation-scoped prompts (#448)', () => {
+  assert.equal(expectsWorkspaceMutation('fix(engine): zero-mutation turn completion on auto/best-coding'), true);
+  assert.equal(expectsWorkspaceMutation('Autonomous implementation for issue #446'), true);
+  assert.equal(expectsWorkspaceMutation('Add input validation to the endpoint'), true);
+  assert.equal(expectsWorkspaceMutation('Update the README with the new flag'), true);
+  assert.equal(expectsWorkspaceMutation('refactor the agent loop'), true);
+  assert.equal(expectsWorkspaceMutation('resolve the failing CI checks'), true);
+
+  assert.equal(expectsWorkspaceMutation('summarize the contents of README.md'), false);
+  assert.equal(expectsWorkspaceMutation('what is the current date'), false);
+  assert.equal(expectsWorkspaceMutation('explain how the agent loop works'), false);
+  assert.equal(expectsWorkspaceMutation('list all exported functions in cli.ts'), false);
+  assert.equal(expectsWorkspaceMutation(''), false);
+});
+
+test('declaresNoChangesNeeded detects explicit no-change verdicts (#448)', () => {
+  assert.equal(declaresNoChangesNeeded('No changes are required — the feature is already implemented.'), true);
+  assert.equal(declaresNoChangesNeeded('nothing to commit, working tree clean'), true);
+  assert.equal(declaresNoChangesNeeded('The requested option is already present in the config.'), true);
+  assert.equal(declaresNoChangesNeeded('This was a read-only question; no modifications were necessary.'), true);
+  assert.equal(declaresNoChangesNeeded('No files were changed.'), true);
+  assert.equal(declaresNoChangesNeeded('The task does not require any edits.'), true);
+
+  assert.equal(declaresNoChangesNeeded('I will now apply the fix to parser.ts.'), false);
+  assert.equal(declaresNoChangesNeeded('Updated parser.ts with the guard clause.'), false);
+  assert.equal(declaresNoChangesNeeded('Here is the plan for the refactor.'), false);
+  assert.equal(declaresNoChangesNeeded(''), false);
 });
 
 test('getWorkspaceGitState and hasWorktreeChanges work on actual git repo', () => {

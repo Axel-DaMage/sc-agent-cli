@@ -120,6 +120,7 @@
 - Loop detection: detects repeated errors to prevent infinite loops
 - Auto-retry with alternative approaches suggested
 - Three failed attempts → alert user
+- **Zero-mutation completion guard**: in unattended runs (`-y`/`--permissions unlimited`), a mutation-scoped prompt cannot end its turn with zero mutating tool calls — the agent re-prompts up to `SC_ZERO_MUTATION_REPROMPTS` times (default 2, 0 disables), honoring explicit no-change verdicts and real worktree deltas
 
 ### Long-Running Execution (100+ iterations)
 

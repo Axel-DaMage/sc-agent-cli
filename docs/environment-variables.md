@@ -56,6 +56,20 @@ When multiple API keys are set, the priority is:
 
 ## Behavior Configuration
 
+### SC_ZERO_MUTATION_REPROMPTS
+
+Controls how many times the agent may block a turn that would complete with zero workspace mutations in unattended mode (`-y` / `--permissions unlimited`). When a prompt requests file changes but the model answers with prose only, the run is re-prompted to execute mutating tools instead of silently finishing as `SCC_NO_CHANGES`.
+
+**Default:** `2` (`0` disables the guard)
+
+```bash
+# Give a weak/routed model more chances to actually apply changes
+export SC_ZERO_MUTATION_REPROMPTS=4
+scc chat -yq 'implement issue #446'
+```
+
+---
+
 ### SC_MAX_ITERATIONS
 
 Controls the maximum number of agent iterations before stopping. Each iteration consists of:

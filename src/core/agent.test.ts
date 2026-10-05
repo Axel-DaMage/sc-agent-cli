@@ -105,7 +105,9 @@ test('Agent.run self-heals when model outputs future intention in autoApprove mo
       // Long response with future intention (not conversational) should trigger self-heal
       return { content: 'I need to investigate the build errors in your project. I will list the files in this directory first and then check the configuration to diagnose the compilation issues.' };
     }
-    return { content: 'Task completed!' };
+    // Explicit no-changes verdict ends the turn cleanly — the #448
+    // zero-mutation guard honors it instead of re-prompting forever.
+    return { content: 'No changes required — the build already passes cleanly.' };
   });
 
   const result = await agent.run('Fix the build errors');
@@ -217,4 +219,216 @@ test('Agent.run recovers after a single empty response', async () => {
   assert.equal(callCount, 2);
   assert.ok(result.some(m => m.role === 'assistant' && m.content === 'Task completed successfully!'));
   mock.mockRestore();
+});
+
+// --- Zero-mutation completion guard (#448) ---
+// Failure signature scc:zero-mutations:auto/best-coding: in unattended runs
+// the model completed its turn with a prose answer and zero mutating tool
+// calls, so the wrapper had nothing to commit. The guard must re-prompt.
+
+test('Agent.run re-prompts a zero-mutation turn completion on a mutation-scoped prompt (#448)', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'auto/best-coding',
+      }
+    }
+  });
+
+  // Mock the mutating tool so nothing touches the real worktree.
+  const { writeFileTool } = await import('../tools/write-file.js');
+  const writeSpy = vi.spyOn(writeFileTool, 'execute').mockResolvedValue('ok');
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      // The #448 failure shape: prose narration of the fix, no tool calls.
+      return { content: 'The parser is missing a null check on the token stream. The right approach is a guard clause at the top of parseToken before accessing token.value.' };
+    }
+    if (callCount === 2) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'w1',
+          type: 'function' as const,
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'parser.ts', content: 'x' }) },
+        }],
+      };
+    }
+    return { content: 'The fix has been applied and the parser is patched.' };
+  });
+
+  const result = await agent.run('Fix the null check in parser.ts');
+
+  assert.equal(callCount, 3);
+  assert.equal(writeSpy.mock.calls.length, 1);
+  const reprompts = result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION'));
+  assert.equal(reprompts.length, 1);
+  assert.match(reprompts[0].content, /apply it now using the tools/i);
+
+  mock.mockRestore();
+  writeSpy.mockRestore();
+});
+
+test('Agent.run caps zero-mutation re-prompts and still completes cleanly', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    livelockThreshold: 0, // disable livelock abort so the reprompt cap is the limiter
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'auto/best-coding',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'Here is a detailed narrative about the codebase structure and how the pieces fit together for the reader.' };
+  });
+
+  const result = await agent.run('Implement the new config option');
+
+  // 1 initial turn + 2 re-prompts (default SC_ZERO_MUTATION_REPROMPTS budget)
+  assert.equal(callCount, 3);
+  assert.equal(result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')).length, 2);
+  mock.mockRestore();
+});
+
+test('Agent.run does not re-prompt zero-mutation turns for read-only prompts', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'This project is a provider-agnostic CLI agent with parallel tool use.' };
+  });
+
+  const result = await agent.run('Summarize what this project does');
+
+  assert.equal(callCount, 1);
+  assert.ok(!result.some(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')));
+  mock.mockRestore();
+});
+
+test('Agent.run does not re-prompt zero-mutation turns in interactive mode', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'The bug sits in the tokenizer where the offset drifts after each consumed chunk.' };
+  });
+
+  const result = await agent.run('Fix the parser bug');
+
+  assert.equal(callCount, 1);
+  assert.ok(!result.some(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')));
+  mock.mockRestore();
+});
+
+test('Agent.run honors an explicit no-changes verdict without re-prompting', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'I inspected the relevant code paths and no changes are required — the guard already exists.' };
+  });
+
+  const result = await agent.run('Fix issue #448 in the engine');
+
+  assert.equal(callCount, 1);
+  assert.ok(!result.some(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')));
+  mock.mockRestore();
+});
+
+test('Agent.run does not count memory_write as a workspace mutation for the guard', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  // Mock the memory store so nothing touches ~/.sc-agent on disk.
+  const { memoryWriteTool } = await import('../tools/memory-tools.js');
+  const memSpy = vi.spyOn(memoryWriteTool, 'execute').mockResolvedValue('saved');
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'm1',
+          type: 'function' as const,
+          function: { name: 'memory_write', arguments: JSON.stringify({ key: 'note', content: 'v' }) },
+        }],
+      };
+    }
+    if (callCount === 2) {
+      return { content: 'Recorded the preference for later sessions.' };
+    }
+    return { content: 'No changes required — only a note was stored.' };
+  });
+
+  const result = await agent.run('Update the stored user preference');
+
+  // memory_write alone does not satisfy the workspace-mutation guard —
+  // the turn is re-prompted once, then the verdict ends it.
+  assert.equal(callCount, 3);
+  assert.equal(result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')).length, 1);
+
+  mock.mockRestore();
+  memSpy.mockRestore();
 });

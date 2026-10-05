@@ -17,6 +17,13 @@ import { saveCheckpoint } from '../utils/checkpoint.js';
 import { AuditLogger } from '../utils/audit-log.js';
 import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
 import { resolveThrottleConfig } from '../utils/throttle.js';
+import {
+  getWorkspaceGitState,
+  hasWorktreeChanges,
+  isWorkspaceMutatingToolCall,
+  expectsWorkspaceMutation,
+  declaresNoChangesNeeded,
+} from '../utils/mutation-detector.js';
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant with access to tools for working with files, web, git, and executing commands.
 
@@ -913,7 +920,19 @@ export class Agent {
     const livelockLimit = this.options.livelockThreshold ?? (this.options.autoApprove ? 3 : 0);
     let harmonyRepromptCount = 0;
     const MAX_HARMONY_REPROMPTS = 2;
-    let forceToolChoice = false;
+    let zeroMutationReprompts = 0;
+    // Re-prompt budget for the zero-mutation completion guard (#448).
+    // Env override follows the SC_MAX_ITERATIONS convention; invalid
+    // values fall back to the default, 0 disables the guard.
+    const zeroMutationRepromptBudget = (() => {
+      const raw = parseInt(process.env.SC_ZERO_MUTATION_REPROMPTS ?? '', 10);
+      return Number.isNaN(raw) ? 2 : Math.max(0, raw);
+    })();
+    const unattendedRun = Boolean(this.options.autoApprove) || this.options.permissionMode === 'unlimited';
+    // Snapshot the worktree before the first LLM call so the guard can
+    // detect mutations made through unclassified paths (e.g. a shell
+    // heredoc write the command classifier missed).
+    const runGitStateBefore = unattendedRun ? getWorkspaceGitState(this.options.workspaceRoot) : null;
     const toolsUsed: Array<{name: string; success: boolean; error?: string; args?: Record<string, unknown>}> = [];
 
     // Reset first chunk flag for new run
@@ -1377,6 +1396,41 @@ export class Agent {
           });
           if (!this.options.quiet) {
             this.log(chalk.yellow(`\n  │ 🔧 Auto-continuing (${selfHealCount}/${MAX_SELF_HEAL}) — forcing fix...`));
+          }
+          continue;
+        }
+
+        // Zero-mutation completion guard (#448): an unattended run whose
+        // prompt requests workspace changes must not end its turn having
+        // executed zero mutating tools — weak/auto-routed models narrate a
+        // plan or paste the fix as prose and the run exits SCC_NO_CHANGES
+        // with nothing applied (failure signature scc:zero-mutations:*).
+        // Re-prompt a bounded number of times; afterwards the turn ends
+        // normally and the caller still gets the documented no-changes
+        // exit contract. An explicit no-changes verdict is honored.
+        const mutatingCalls = toolsUsed.reduce(
+          (n, t) => n + (t.success && isWorkspaceMutatingToolCall(t.name, t.args) ? 1 : 0),
+          0
+        );
+        if (
+          unattendedRun &&
+          zeroMutationReprompts < zeroMutationRepromptBudget &&
+          mutatingCalls === 0 &&
+          expectsWorkspaceMutation(userMessage) &&
+          !declaresNoChangesNeeded(content) &&
+          !hasWorktreeChanges(runGitStateBefore, getWorkspaceGitState(this.options.workspaceRoot))
+        ) {
+          zeroMutationReprompts++;
+          messages.push({
+            role: 'user',
+            content:
+              `[ZERO-MUTATION ${zeroMutationReprompts}/${zeroMutationRepromptBudget} — iteration ${iterations}] ` +
+              `The turn is about to end, but this run produced ZERO workspace changes — no write_file, edit_file, mutating git operation, or mutating run_shell command was executed. ` +
+              `The task requires modifying the workspace. Do NOT describe or paste the fix in prose — apply it now using the tools. ` +
+              `If the task is genuinely read-only, or the requested change is already present, state explicitly that no changes are required and explain why.`,
+          });
+          if (!this.options.quiet) {
+            this.log(chalk.yellow(`\n  │ 🔧 Zero-mutation turn blocked (${zeroMutationReprompts}/${zeroMutationRepromptBudget}) — forcing execution...`));
           }
           continue;
         }

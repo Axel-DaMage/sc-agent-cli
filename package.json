@@ -10,10 +10,12 @@
   },
   "scripts": {
     "prepare": "husky",
+    "prebuild": "node scripts/ensure-deps.mjs typescript",
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node bin/sc.js",
     "clean": "rm -rf dist",
+    "pretest": "node scripts/ensure-deps.mjs vitest",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

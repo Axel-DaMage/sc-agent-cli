@@ -196,6 +196,17 @@ export function isMutatingToolCall(toolName: string, args?: unknown): boolean {
 }
 
 /**
+ * Workspace-scoped variant of {@link isMutatingToolCall}: `memory_write`
+ * mutates the persistent memory store (~/.sc-agent), not the workspace,
+ * so it does not count as a workspace mutation for the zero-mutation
+ * completion guard (#448).
+ */
+export function isWorkspaceMutatingToolCall(toolName: string, args?: unknown): boolean {
+  if (toolName === 'memory_write') return false;
+  return isMutatingToolCall(toolName, args);
+}
+
+/**
  * Count mutating tool calls in a message history.
  */
 export function countMutatingToolCalls(history: Message[]): number {
@@ -209,6 +220,88 @@ export function countMutatingToolCalls(history: Message[]): number {
     }
   }
   return count;
+}
+
+/**
+ * Heuristic: does the user prompt request workspace changes? (#448)
+ *
+ * Used by the agent loop to decide whether a turn may legitimately
+ * complete with zero mutating tool calls. Recall beats precision — a
+ * false positive costs at most a bounded re-prompt, while a false
+ * negative re-opens the zero-mutation failure signature.
+ */
+const MUTATION_INTENT_PATTERN = new RegExp(
+  `\\b(${[
+    'fix',
+    'implement',
+    'add',
+    'creat',
+    'writ',
+    'edit',
+    'updat',
+    'refactor',
+    'patch',
+    'delet',
+    'remov',
+    'renam',
+    'mov',
+    'modif',
+    'chang',
+    'resolv',
+    'migrat',
+    'install',
+    'uninstall',
+    'commit',
+    'apply',
+    'insert',
+    'append',
+    'replac',
+    'revert',
+    'configur',
+    'scaffold',
+    'generat',
+    'upgrad',
+    'downgrad',
+    'bump',
+    'repair',
+    'correct',
+    'adjust',
+    'rewrit',
+    'extend',
+    'introduc',
+    'merg',
+    'restor',
+    'rework',
+    'address',
+    'handle',
+    'deploy',
+    'improv',
+    'optimi',
+    'set\\s+up',
+    'clean\\s*up',
+    'issue\\s*#?\\d+',
+    'pr\\s*#?\\d+',
+  ].join('|')})`,
+  'i',
+);
+
+export function expectsWorkspaceMutation(prompt: string): boolean {
+  if (!prompt || typeof prompt !== 'string') return false;
+  return MUTATION_INTENT_PATTERN.test(prompt);
+}
+
+/**
+ * Detect an explicit "no changes needed" verdict in an assistant
+ * response (#448). When the model states the task is complete without
+ * requiring file changes, the zero-mutation completion guard honors
+ * the verdict instead of re-prompting pointlessly.
+ */
+const NO_CHANGES_VERDICT_PATTERN =
+  /\b(?:no\s+(?:file\s+|code\s+|workspace\s+)?changes?\s+(?:is|are|was|were)?\s*(?:required|needed|necessary)|nothing\s+to\s+(?:change|modify|fix|commit|push|add|update|do)|already\s+(?:fixed|implemented|applied|present|done|resolved|covered|in\s+place|up\s+to\s+date|passes|works|exists|committed)|no\s+(?:modifications?|updates?|edits?)\s+(?:is|are|was|were)?\s*(?:required|needed|necessary|made)|does\s+not\s+require\s+(?:any\s+)?(?:changes?|modifications?|edits?)|no\s+files?\s+(?:were|was|needs?|required)\s+(?:to\s+be\s+)?(?:changed|modified|created|updated|edited))/i;
+
+export function declaresNoChangesNeeded(content: string): boolean {
+  if (!content || typeof content !== 'string') return false;
+  return NO_CHANGES_VERDICT_PATTERN.test(content);
 }
 
 /**
