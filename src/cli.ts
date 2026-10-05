@@ -78,6 +78,20 @@ program
         }
       }
 
+      // Validate --output-format early (before config load, MCP connects,
+      // and plugin loading): unknown formats are a usage error, and json is
+      // a batch contract (#399) — without a prompt there is no run to
+      // summarize.
+      const outputFormat = options.outputFormat ?? 'text';
+      if (outputFormat !== 'text' && outputFormat !== 'json') {
+        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
+        process.exit(1);
+      }
+      if (outputFormat === 'json' && (!prompt || !prompt.trim())) {
+        console.error(chalk.red('Error: --output-format json requires a prompt (or --prompt-file); it is only valid for non-interactive runs'));
+        process.exit(1);
+      }
+
       // Count -v flags from raw argv
       const verboseCount = (() => {
         let count = 0;
@@ -219,11 +233,6 @@ program
         const { registerPluginTools } = await import('./tools/registry.js');
         registerPluginTools(await loadPluginTools(config.plugins, process.cwd()));
       }
-      const outputFormat = options.outputFormat ?? 'text';
-      if (outputFormat !== 'text' && outputFormat !== 'json') {
-        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
-        process.exit(1);
-      }
       // Execution budgets: flag > env var; must be positive integers
       const budgetOpt = (flag: string | undefined, env: string | undefined, name: string): number | undefined => {
         const raw = flag ?? env;
@@ -258,7 +267,13 @@ program
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Error: ${errorMsg}`));
-      process.exit(classifyError(err));
+      // Defer exit briefly: the run manifest is an async stdout write that a
+      // hard process.exit() can truncate on pipes (#399). exitCode covers a
+      // natural early exit; the ref'd timer forces termination (MCP children
+      // can otherwise hold the event loop open).
+      const exitCode = classifyError(err);
+      process.exitCode = exitCode;
+      setTimeout(() => process.exit(exitCode), 50);
     }
   });
 

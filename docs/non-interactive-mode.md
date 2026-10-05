@@ -135,20 +135,26 @@ sc -yq "run npm test and report results"
 
 ## Run Manifest (JSON)
 
-In batch mode, the last stdout line is always a single-line JSON manifest — parse with `tail -1 | jq`. With `--output-format json` it is the *only* stdout output (the model's streamed answer is suppressed and carried in `final_message`).
+In batch mode, the last stdout line is always a single-line JSON manifest — parse with `tail -1 | jq`. With `--output-format json` it is the *only* stdout output: the model's streamed answer is suppressed (carried in `final_message`), and status markers (`SCC_NO_CHANGES`, `SC_BUDGET_EXCEEDED`), warnings, and errors go to **stderr** so stdout stays a single parseable JSON object.
 
 ```bash
 sc chat -yq --output-format json --output-file run.json "add input validation"
 ```
 
 ```json
-{"v":1,"success":true,"model":"gpt-4o","tokens_in":41230,"tokens_out":3180,
- "estimated_cost_usd":0.1284,"tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},
- "tool_calls_total":10,"iterations":14,"duration_ms":84210,"exit_reason":"success",
- "final_message":"Added zod validation to ...","checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json"}
+{"v":1,"version":"0.4.2","success":true,"model":"gpt-4o","session_id":"<id>",
+ "exit_reason":"success","iterations":14,
+ "tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},"tool_calls_total":10,
+ "tokens_in":41230,"tokens_out":3180,"estimated_cost_usd":0.1284,
+ "duration_ms":84210,"final_message":"Added zod validation to ...",
+ "checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json","error":null}
 ```
 
-`exit_reason` is one of `success | error | no_changes | budget_exceeded`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), and budget exhaustion (`SC_BUDGET_EXCEEDED`) — always as the last stdout line.
+`exit_reason` is one of `success | error | no_changes | budget_exceeded | interrupted`. `checkpoint` points to the resumable state file when one exists (see `--resume`; `session_id` is also a valid resume ref). `error` carries the failure description on non-success exits, else `null`.
+
+The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), budget exhaustion (`SC_BUDGET_EXCEEDED`), and signal interruption (`SIGINT` → exit 130, `SIGTERM` → exit 143, e.g. CI `timeout` kills) — always as the last stdout line, with `success:false` on failure exits.
+
+`--output-format json` requires a prompt (or `--prompt-file`); it is rejected for interactive sessions.
 
 ---
 
@@ -383,6 +389,8 @@ Batch runs terminate with a documented exit code — wrappers branch on `$?` alo
 | `21` | Auth error — 401/403, missing or invalid API key | `Error: …` |
 | `22` | Execution budget exhausted (`--max-steps`/`--max-seconds`/`--max-total-tokens`) | `SC_BUDGET_EXCEEDED <steps\|seconds\|tokens>` |
 | `23` | Agent-loop abort — tool livelock (`--livelock-threshold`), unrecoverable loop | `[SC_LIVELOCK] …` |
+| `130` | Interrupted by `SIGINT` (batch only) | manifest `exit_reason: "interrupted"` |
+| `143` | Interrupted by `SIGTERM` (batch only, e.g. `timeout` kills) | manifest `exit_reason: "interrupted"` |
 
 Reserved: 2-9 clean terminals, 11-19 run outcomes, 24+ fatal. Codes are stable across releases.
 

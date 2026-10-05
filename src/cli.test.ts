@@ -68,3 +68,23 @@ test('CLI --prompt-file rejects an empty file', () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /prompt file .* is empty/);
 });
+
+test('CLI --output-format rejects unknown formats', () => {
+  const result = spawnSync(process.execPath, [cliEntrypoint, '--output-format', 'yaml', 'hi'], {
+    cwd: projectRoot,
+    encoding: 'utf-8',
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--output-format must be "text" or "json"/);
+});
+
+test('CLI --output-format json requires a prompt', () => {
+  const result = spawnSync(process.execPath, [cliEntrypoint, '--output-format', 'json'], {
+    cwd: projectRoot,
+    encoding: 'utf-8',
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--output-format json requires a prompt/);
+});

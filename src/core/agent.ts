@@ -1495,13 +1495,13 @@ export class Agent {
     // Compact fallback warning for iteration limit
     if (hitIterationLimit) {
       this.log(chalk.gray(`\n  ⚠️  Maximum iteration limit (${MAX_ITERATIONS}) reached`));
-      if (hadErrors) console.log(chalk.gray(`  ${failedTools.length} error(s) encountered. The task may be incomplete.`));
+      if (hadErrors) this.log(chalk.gray(`  ${failedTools.length} error(s) encountered. The task may be incomplete.`));
     }
 
     // Warning for repeated errors (loop detection)
     if (hasRepeatedErrors && !taskCompleted) {
       this.log(chalk.gray('\n  ⚠️  Detected repeated errors (possible infinite loop):'));
-      repeatedErrors.forEach(([errorKey, count]) => console.log(chalk.gray(`  ${count}x: ${errorKey.substring(0, 50)}...`)));
+      repeatedErrors.forEach(([errorKey, count]) => this.log(chalk.gray(`  ${count}x: ${errorKey.substring(0, 50)}...`)));
       this.log(chalk.gray('  The agent attempted the same failing operation multiple times.'));
     }
 

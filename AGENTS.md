@@ -52,6 +52,7 @@
 - **`src/utils/storage-guidance.ts`**: Storage usage tips
 - **`src/utils/token-tracker.ts`**: Token usage estimation and cost tracking
 - **`src/utils/checkpoint.ts`**: Execution state checkpointing for crash recovery
+- **`src/utils/run-manifest.ts`**: Machine-readable run manifest builder/emitter for headless batch runs (`--output-format json`, `--summary-file`, `--output-file`)
 
 ### Commands
 
