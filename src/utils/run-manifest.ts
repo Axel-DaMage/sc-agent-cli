@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Message } from '../core/types.js';
+import type { DevcontainerRunInfo } from '../core/devcontainer.js';
 import { verboseError } from './verbose-logger.js';
 
 /**
@@ -46,6 +47,8 @@ export interface RunManifest {
   checkpoint: string | null;
   /** Error description on failure exits, null otherwise. */
   error: string | null;
+  /** Devcontainer exec path + in-container marker when `--devcontainer` was requested (#421). */
+  devcontainer?: DevcontainerRunInfo;
 }
 
 const FINAL_MESSAGE_MAX = 4000;
@@ -65,6 +68,7 @@ export interface RunManifestInput {
   iterations: number;
   durationMs: number;
   checkpointPath: string | null;
+  devcontainer?: DevcontainerRunInfo;
 }
 
 export function buildRunManifest(input: RunManifestInput): RunManifest {
@@ -88,6 +92,7 @@ export function buildRunManifest(input: RunManifestInput): RunManifest {
     final_message: lastAssistant ? String(lastAssistant.content).slice(0, FINAL_MESSAGE_MAX) : null,
     checkpoint: input.checkpointPath,
     error: input.error ?? null,
+    ...(input.devcontainer ? { devcontainer: input.devcontainer } : {}),
   };
 }
 

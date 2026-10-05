@@ -188,6 +188,24 @@ Oldest files are automatically deleted to bring usage down to 90% of the limit.
 
 ---
 
+### SC_DEVCONTAINER_AGENT_CMD
+
+Command executed inside the devcontainer when `scc chat --devcontainer` runs the agent loop via `devcontainer exec`.
+
+**Default:** `scc`
+
+```bash
+# Use a differently-named/global install inside the container
+export SC_DEVCONTAINER_AGENT_CMD="sc"
+scc chat -yq --devcontainer "run the test suite"
+```
+
+### SC_DEVCONTAINER
+
+Remote-env marker **set automatically** by `devcontainer exec` — it marks that the current process already runs inside the container (recursion guard + run-manifest evidence). Do not set it on the host.
+
+---
+
 ## Complete Examples
 
 ### Development (Local Ollama)

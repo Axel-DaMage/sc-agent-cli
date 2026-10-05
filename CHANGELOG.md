@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`permissions.denyCommands`**: non-interactive shell command blocklist for `run_shell`. Matching commands are hard-blocked before execution in every permission mode — including `-y`/autoApprove. Patterns support substring match (default) or full-command glob with `*`. Shown in `/config` display and documented in `docs/permission-profiles.md`.
 
+- **`--devcontainer`**: run the agent loop inside the repo's declared devcontainer for CI/prod parity — detects `.devcontainer.json`/`.devcontainer/devcontainer.json` (reported in `sc probe` as `devcontainer: true` + `devcontainerPath`), brings it up via `devcontainer up --workspace-folder .`, then re-enters `scc chat` inside with `devcontainer exec --workspace-folder . --remote-env SC_DEVCONTAINER=1 …`. The exec path is recorded in `--audit-log` (`type: "devcontainer"` events) and the in-container run exposes the `SC_DEVCONTAINER` marker + container `hostname` in the run manifest. Missing `devcontainer`/`docker` CLIs or any `up`/`exec` failure falls back to host execution classified `devcontainer_unavailable` — never hard-fails. `SC_DEVCONTAINER_AGENT_CMD` overrides the in-container command (default `scc`). See `docs/non-interactive-mode.md`. (Closes #421)
+
 ### 🐛 Fixed
 
 - **`npm run build` / `npm test` self-bootstrap missing dependencies:** fresh worktrees and pre-PR quality gates that invoke the scripts without a prior `npm ci` failed with `sh: line 1: tsc: command not found`. New `scripts/ensure-deps.mjs` pre-hooks detect the missing package and run `npm ci` (or `npm install` without a lockfile) automatically; the hooks are no-ops when `node_modules` is already present. (Fixes #448)

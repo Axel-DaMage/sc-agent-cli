@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export interface AuditEvent {
-  type: 'llm_request' | 'llm_response' | 'tool_call' | 'tool_result';
+  type: 'llm_request' | 'llm_response' | 'tool_call' | 'tool_result' | 'devcontainer';
   [key: string]: unknown;
 }
 

@@ -16,6 +16,7 @@ import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
 import { classifyError } from './utils/exit-codes.js';
+import type { DevcontainerRunInfo } from './core/devcontainer.js';
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('../package.json') as { version: string };
@@ -52,9 +53,46 @@ program
   .option('--max-seconds <n>', 'Stop gracefully after N seconds of wall-clock time (env: SC_MAX_SECONDS)')
   .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
   .option('--no-commit', 'Hard-block git mutations inside the session (for orchestrators that own git state)')
+  .option('--devcontainer', 'Run the agent loop inside the repo .devcontainer via the Dev Container CLI (falls back to host when unavailable)')
   .option('--prompt-file <path>', 'Read the prompt from a file (use "-" to read from stdin). Mutually exclusive with the prompt argument.')
   .action(async (prompt: string | undefined, options) => {
     try {
+      // --devcontainer (#421): execute the agent loop inside the repo
+      // devcontainer via `devcontainer up` + `devcontainer exec`. Runs BEFORE
+      // prompt-file resolution so a `--prompt-file -` stdin stream passes
+      // through to the in-container run intact. The SC_DEVCONTAINER remote-env
+      // marker means we already run inside the container — record its evidence
+      // instead of re-orchestrating.
+      let devcontainerRun: DevcontainerRunInfo | undefined;
+      if (options.devcontainer) {
+        const dc = await import('./core/devcontainer.js');
+        if (dc.isInsideDevcontainer(process.env)) {
+          devcontainerRun = dc.insideDevcontainerRunInfo(process.cwd(), process.env);
+          dc.auditDevcontainerEvent(options.auditLog, {
+            phase: 'inside',
+            exec_path: 'devcontainer',
+            status: 'devcontainer',
+            marker: devcontainerRun.marker,
+            hostname: devcontainerRun.hostname,
+            config_path: devcontainerRun.config_path,
+          });
+        } else {
+          const outcome = await dc.orchestrateDevcontainer({
+            workspaceRoot: process.cwd(),
+            argv: process.argv.slice(2),
+            auditLogPath: options.auditLog,
+            quiet: Boolean(options.quiet) || options.outputFormat === 'json',
+            env: process.env,
+          });
+          if (outcome.executed) {
+            // The in-container run owns the manifest/exit contract — propagate.
+            process.exit(outcome.exitCode);
+          } else {
+            devcontainerRun = outcome.runInfo;
+          }
+        }
+      }
+
       // --prompt-file: load the prompt from a file instead of argv (#413).
       // Large prompts passed as argv hit shell quoting/escaping issues and
       // ARG_MAX limits; a file (or stdin) avoids both.
@@ -257,6 +295,7 @@ program
         resumeCheckpoint,
         auditLog: options.auditLog,
         livelockThreshold,
+        devcontainer: devcontainerRun,
         summaryFile: options.summaryFile,
         outputFile: options.outputFile,
         outputFormat,

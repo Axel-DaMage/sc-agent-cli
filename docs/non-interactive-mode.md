@@ -130,6 +130,7 @@ sc -yq "run npm test and report results"
 | `-yq` | Combined: auto-approve + quiet | Fully automated scripts |
 | `--output-format json` | Emit *only* the JSON run manifest on stdout | Machine consumers (CI workers, dashboards) |
 | `--summary-file <path>` / `--output-file <path>` | Also write the manifest to a file | Artifact collection, cost accounting |
+| `--devcontainer` | Run the agent inside the repo `.devcontainer` image | CI/prod parity, toolchain drift prevention |
 
 ---
 
@@ -155,6 +156,42 @@ sc chat -yq --output-format json --output-file run.json "add input validation"
 The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), budget exhaustion (`SC_BUDGET_EXCEEDED`), and signal interruption (`SIGINT` → exit 130, `SIGTERM` → exit 143, e.g. CI `timeout` kills) — always as the last stdout line, with `success:false` on failure exits.
 
 `--output-format json` requires a prompt (or `--prompt-file`); it is rejected for interactive sessions.
+
+When `--devcontainer` is used the manifest also carries a `devcontainer` block recording the resolved execution path:
+
+```json
+"devcontainer": {"requested": true, "exec_path": "devcontainer", "status": "devcontainer",
+  "marker": "SC_DEVCONTAINER=1", "hostname": "b3f1a2c4d5e6",
+  "config_path": ".devcontainer/devcontainer.json"}
+```
+
+or, on fallback:
+
+```json
+"devcontainer": {"requested": true, "exec_path": "host",
+  "status": "devcontainer_unavailable", "reason": "cli_missing",
+  "config_path": ".devcontainer/devcontainer.json"}
+```
+
+---
+
+## Devcontainer Execution (`--devcontainer`)
+
+Repos that declare a `.devcontainer.json` (repo root) or `.devcontainer/devcontainer.json` already pin their toolchain. `--devcontainer` runs the agent loop inside that image instead of on the host:
+
+```bash
+scc chat -yq --devcontainer --output-file run.json "implement issue #42"
+```
+
+How it works (all via the [Dev Container CLI](https://github.com/devcontainers/cli), which must be on `PATH` together with `docker`):
+
+1. Detect the devcontainer config (`sc probe` reports it as `devcontainer: true` + `devcontainerPath`).
+2. `devcontainer up --workspace-folder .` — build/start the container.
+3. `devcontainer exec --workspace-folder . --remote-env SC_DEVCONTAINER=1 scc chat <original args>` — the full argv is forwarded verbatim, and the `SC_DEVCONTAINER` remote-env marker tells the in-container run to record itself in the manifest (`marker` + container `hostname`) instead of re-orchestrating. The in-container exit code propagates to the caller.
+
+**Fallback — never hard-fails.** If the `devcontainer`/`docker` CLIs are missing, no devcontainer config exists, or `devcontainer up`/`exec` fails for any reason, the run continues on the host and is classified `devcontainer_unavailable` with a `reason` of `no_config | cli_missing | docker_missing | up_failed | exec_failed`. The decision is written to the audit log (`--audit-log`, `type: "devcontainer"` events record the exec path and command) and to the run manifest.
+
+Env knobs: `SC_DEVCONTAINER_AGENT_CMD` overrides the in-container command (default `scc`). `SC_DEVCONTAINER` is set automatically inside the container — do not set it on the host.
 
 ---
 

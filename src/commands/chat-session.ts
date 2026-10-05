@@ -652,6 +652,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       iterations: stats.iterations,
       durationMs: Date.now() - batchStart,
       checkpointPath: existsSync(checkpointPath) ? checkpointPath : null,
+      devcontainer: options.devcontainer,
     });
     emitRunManifest(manifest, {
       files: [options.summaryFile, options.outputFile],

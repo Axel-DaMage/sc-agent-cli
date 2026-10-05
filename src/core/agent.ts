@@ -710,6 +710,8 @@ export interface AgentOptions {
   livelockThreshold?: number;
   summaryFile?: string;
   outputFile?: string;
+  /** #421 devcontainer execution evidence — surfaced in the run manifest. */
+  devcontainer?: import('./devcontainer.js').DevcontainerRunInfo;
   /** 'json' suppresses all human stdout (banner, streamed answer) — the run
    *  manifest JSON line is the only stdout output. */
   outputFormat?: 'text' | 'json';
