@@ -38,6 +38,7 @@ export async function showConfig(
     || process.env.ANTHROPIC_API_KEY
     || process.env.NVIDIA_API_KEY;
   const envModel = process.env.SC_MODEL;
+  const envBaseUrl = process.env.SC_BASE_URL;
   const envProfile = process.env.SC_PROFILE;
   const envMaxIter = process.env.SC_MAX_ITERATIONS;
   const envMaxStorage = process.env.SC_MAX_STORAGE_GB;
@@ -57,6 +58,7 @@ export async function showConfig(
   const overrides: string[] = [];
   if (envApiKey) overrides.push('SC_API_KEY / OPENAI_API_KEY');
   if (envModel) overrides.push('SC_MODEL');
+  if (envBaseUrl) overrides.push('SC_BASE_URL');
   if (envProfile) overrides.push('SC_PROFILE');
   if (envMaxIter) overrides.push('SC_MAX_ITERATIONS');
   if (envMaxStorage) overrides.push('SC_MAX_STORAGE_GB');
@@ -137,6 +139,7 @@ export async function showConfig(
   section('Environment Variables');
   console.log(` ${chalk.white('SC_API_KEY'.padEnd(22))} ${chalk.gray('API key (overrides config)')}`);
   console.log(` ${chalk.white('SC_MODEL'.padEnd(22))} ${chalk.gray('Model name (overrides config)')}`);
+  console.log(` ${chalk.white('SC_BASE_URL'.padEnd(22))} ${chalk.gray('Provider base URL (overrides config)')}`);
   console.log(` ${chalk.white('SC_PROFILE'.padEnd(22))} ${chalk.gray('Active profile name')}`);
   console.log(` ${chalk.white('SC_MAX_ITERATIONS'.padEnd(22))} ${chalk.gray('Max agent loop iterations (default: 100)')}`);
   console.log(` ${chalk.white('SC_MAX_STORAGE_GB'.padEnd(22))} ${chalk.gray('Storage limit in GB (default: 1)')}`);

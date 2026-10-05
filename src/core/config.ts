@@ -119,6 +119,12 @@ export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
     config.model.model = envModel;
   }
 
+  // Override base URL from environment variable (validated in validateConfig)
+  const envBaseUrl = process.env.SC_BASE_URL;
+  if (envBaseUrl) {
+    config.model.baseUrl = envBaseUrl;
+  }
+
   // Override policy file from environment variable
   const envPolicyFile = process.env.SC_POLICY_FILE;
   if (envPolicyFile) {

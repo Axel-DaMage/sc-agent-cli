@@ -104,7 +104,7 @@
 2. Global config (`~/.sc-agent/config.json`)
 3. Project config (`.sc-agent.json`)
 4. Active profile overrides
-5. Environment variables (SC_API_KEY, SC_MODEL, SC_PROFILE)
+5. Environment variables (SC_API_KEY, SC_MODEL, SC_BASE_URL, SC_PROFILE)
 
 ### Permission System
 
