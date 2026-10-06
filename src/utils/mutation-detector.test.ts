@@ -320,6 +320,9 @@ test('getWorkspaceGitState and hasWorktreeChanges work on actual git repo', () =
 
     const before = getWorkspaceGitState(tmp);
     assert.ok(before !== null);
+    // repo top-level is captured for repo-relative path resolution (#464)
+    assert.equal(typeof before.root, 'string');
+    assert.ok((before.root ?? '').length > 0);
 
     writeFileSync(join(tmp, 'file.txt'), 'hello');
     const after = getWorkspaceGitState(tmp);

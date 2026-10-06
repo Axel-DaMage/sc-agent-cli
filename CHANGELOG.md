@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Config `model` silently ignored**: removed the implicit `activeProfile: 'ollama'` default that overrode user-configured `model.baseUrl`/`model.model` when no profile was selected (#398).
 
+- **Model can no longer self-revert its own edits via `run_shell` git commands:** an unattended run (`-y`/`--permissions unlimited`) could end with `edit_file` applied at an earlier iteration and a later `git checkout -- .`/`git restore`/`git reset --hard`/`git clean -f`/`git stash` silently wiping the worktree before the wrapper committed — the manifest then reported `files_changed` against a clean tree. `run_shell` now refuses all git-mutating commands in unattended mode with a clear refusal routed to the model (the dedicated `git` tool owns repo state); interactive mode is unchanged. `files_changed` now counts the real worktree diff — `git status --porcelain` after the run plus files in commits created during the run, excluding engine artifacts (`--summary-file`/`--output-file`/`--audit-log` inside the worktree) — so a run whose edits were reverted reports `0` instead of its session tool-call count. (Fixes #464)
+
 ---
 
 ## [0.3.1] - 2026-06-28

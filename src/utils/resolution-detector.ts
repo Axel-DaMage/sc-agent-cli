@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import type { Message } from '../core/types.js';
 import type { WorkspaceGitState, MutationDetectionResult } from './mutation-detector.js';
 import { EXIT_CODES } from './exit-codes.js';
@@ -28,26 +29,46 @@ export interface DetectResolutionOptions {
   beforeGitState?: WorkspaceGitState | null;
   afterGitState?: WorkspaceGitState | null;
   workspaceRoot?: string;
+  /** Engine-owned artifact paths (e.g. --summary-file/--output-file/--audit-log
+   *  written inside the worktree) excluded from files_changed (#464). */
+  excludePaths?: string[];
 }
 
 export function countFilesChanged(
   beforeGitState?: WorkspaceGitState | null,
   afterGitState?: WorkspaceGitState | null,
   history?: Message[],
-  workspaceRoot?: string
+  workspaceRoot?: string,
+  excludePaths?: string[]
 ): number {
   const changedFiles = new Set<string>();
+  const excluded = new Set((excludePaths ?? []).map(p => resolve(p)));
 
-  // 1. Git status after session
+  // Porcelain status paths and `git diff --name-only` output are
+  // repo-root-relative; write_file/edit_file args are workspace-relative.
+  const repoRoot = afterGitState?.root || beforeGitState?.root || workspaceRoot || process.cwd();
+  const wsRoot = workspaceRoot || repoRoot;
+
+  const addPath = (absPath: string) => {
+    if (!excluded.has(absPath)) changedFiles.add(absPath);
+  };
+
+  const addRepoPath = (rawPath: string) => {
+    let p = rawPath.trim();
+    if (!p) return;
+    if (p.includes('->')) p = p.split('->').pop()!.trim();
+    if (p.length > 1 && p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+    if (p) addPath(resolve(repoRoot, p));
+  };
+
+  // 1. Git status after session — the real worktree diff. Session artifacts
+  //    (files the model wrote then reverted, or claimed in tool args) do not
+  //    appear here and must not be counted (#464).
   if (afterGitState?.status) {
     const lines = afterGitState.status.split('\n');
     for (const line of lines) {
       if (!line.trim()) continue;
-      const match = line.slice(3).trim();
-      if (match) {
-        const file = match.includes('->') ? match.split('->').pop()!.trim() : match;
-        changedFiles.add(file);
-      }
+      addRepoPath(line.slice(3));
     }
   }
 
@@ -61,10 +82,7 @@ export function countFilesChanged(
       });
       if (res.status === 0 && res.stdout) {
         for (const file of res.stdout.split('\n')) {
-          const trimmed = file.trim();
-          if (trimmed) {
-            changedFiles.add(trimmed);
-          }
+          addRepoPath(file);
         }
       }
     } catch {
@@ -72,8 +90,10 @@ export function countFilesChanged(
     }
   }
 
-  // 3. Fallback / supplement: tool calls in history
-  if (history) {
+  // 3. Fallback: only when no git state is available (non-git workspace) —
+  //    tool-call records are the only mutation signal. In a real repo a clean
+  //    status after the run means edits were reverted and count as 0 (#464).
+  if (!afterGitState && history) {
     for (const msg of history) {
       if (msg.role === 'assistant' && msg.tool_calls) {
         for (const tc of msg.tool_calls) {
@@ -81,7 +101,7 @@ export function countFilesChanged(
             try {
               const args = JSON.parse(tc.function.arguments);
               if (args?.path) {
-                changedFiles.add(args.path);
+                addPath(resolve(wsRoot, String(args.path)));
               }
             } catch {
               // ignore JSON error
@@ -105,9 +125,10 @@ export function detectSessionResolution(options: DetectResolutionOptions): Resol
     beforeGitState,
     afterGitState,
     workspaceRoot,
+    excludePaths,
   } = options;
 
-  const files_changed = countFilesChanged(beforeGitState, afterGitState, history, workspaceRoot);
+  const files_changed = countFilesChanged(beforeGitState, afterGitState, history, workspaceRoot, excludePaths);
 
   // 1. Unhandled agent / provider error
   if (agentError || exitReason === 'error') {

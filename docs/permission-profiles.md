@@ -391,6 +391,16 @@ Denied calls return a clear "git is managed externally" error so the model proce
 
 ---
 
+## Unattended Git Guard (`-y` / `--permissions unlimited`)
+
+In unattended runs the dedicated `git` tool owns repo state: `run_shell` refuses **every** git-mutating command — `git checkout --`, `git restore`, `git reset --hard`, `git clean -f`, `git stash`, plus `add`/`commit`/`push`/`pull`/`rebase`/`merge`/`cherry-pick`/`revert`/`tag <args>`/`branch <args>`/`clone`/`init`/`fetch`/`mv`/`rm`/`am`/`apply`/`submodule`/`worktree`/`switch`/`checkout` (including inside `cd x && git …` chains). The refusal error is routed back to the model and steers it to the `git` tool for supported operations (`status`, `diff`, `log`, `show`, `branch`, `add`, `commit`, `format`).
+
+Why: an unattended model that runs `git checkout -- .`/`git restore`/`git reset --hard`/`git clean`/`git stash` can silently revert its own edits before the wrapper commits — the run reports success against a clean tree. Read-only git (`status`, `diff`, `log`, `show`, bare `branch`/`tag`) and all non-git commands stay allowed. Interactive mode is unaffected — the human approves each command.
+
+To block git mutations in **every** mode (orchestrators that own git state externally), use `denyGitMutation` / `--no-commit` above — it additionally disables the `git` tool's `add`/`commit`.
+
+---
+
 ## Troubleshooting
 
 ### Too many prompts in Blacklist mode

@@ -7,12 +7,12 @@ const { version: packageVersion } = require('../../package.json') as { version: 
 import { stdin as input, stdout as output } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { Agent } from '../core/agent.js';
 import type { AgentOptions } from '../core/agent.js';
 import type { Message } from '../core/types.js';
-import { loadConfig } from '../core/config.js';
+import { loadConfig, getGlobalConfigPath } from '../core/config.js';
 import { clearSessionPermissions } from '../utils/permissions.js';
 import { checkStorageLimit, enforceStorageLimit, formatBytes } from '../utils/storage-limit.js';
 import { estimateCost } from '../utils/token-tracker.js';
@@ -641,6 +641,13 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   let agentError: Error | undefined;
   let budgetExceeded: string | null | undefined;
 
+  // Engine-owned artifacts (--summary-file/--output-file/--audit-log) can be
+  // written inside the worktree. They are session artifacts, not real repo
+  // diffs — exclude them from the manifest's files_changed (#464).
+  const engineArtifactPaths = [options.summaryFile, options.outputFile, options.auditLog]
+    .filter((p): p is string => typeof p === 'string' && p.length > 0)
+    .map(p => resolve(options.workspaceRoot, p));
+
   const detectResolutionSafely = (exitReason: RunExitReason) => {
     try {
       return detectSessionResolution({
@@ -651,6 +658,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         beforeGitState: batchGitStateBefore,
         afterGitState: getWorkspaceGitState(options.workspaceRoot),
         workspaceRoot: options.workspaceRoot,
+        excludePaths: engineArtifactPaths,
       });
     } catch {
       return undefined;
@@ -1163,10 +1171,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         if (sel.fields && sel.fields.length > 0) {
           hudFields = sel.fields;
           const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const { homedir } = await import('node:os');
-          const configPath = join(homedir(), '.sc-agent', 'config.json');
-          const configDir = join(homedir(), '.sc-agent');
+          const { dirname } = await import('node:path');
+          const configPath = getGlobalConfigPath();
+          const configDir = dirname(configPath);
           if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
           let cfg: Record<string, unknown> = {};
           if (existsSync(configPath)) cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -1188,10 +1195,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         // Toggle on/off
         hudEnabled = !hudEnabled;
         const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-        const { join } = await import('node:path');
-        const { homedir } = await import('node:os');
-        const configPath = join(homedir(), '.sc-agent', 'config.json');
-        const configDir = join(homedir(), '.sc-agent');
+        const { dirname } = await import('node:path');
+        const configPath = getGlobalConfigPath();
+        const configDir = dirname(configPath);
         if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
         let cfg: Record<string, unknown> = {};
         if (existsSync(configPath)) cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -1244,7 +1250,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         console.log(chalk.gray(`  ${options.workspaceRoot}`));
 
         console.log(chalk.gray('\n🌐 Config'));
-        console.log(chalk.gray(`  ~/.sc-agent/config.json`));
+        console.log(chalk.gray(`  ${getGlobalConfigPath()}`));
         console.log(chalk.gray(`  Active profile: ${currentConfig.activeProfile || 'none'}`));
         console.log(chalk.gray(`  Model: ${currentConfig.model.model}`));
         console.log();
@@ -1465,9 +1471,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         try {
           const fs = await import('node:fs');
           const path = await import('node:path');
-          const { homedir } = await import('node:os');
 
-          const configPath = path.join(homedir(), '.sc-agent', 'config.json');
+          const configPath = getGlobalConfigPath();
           const configDir = path.dirname(configPath);
 
           if (!fs.existsSync(configDir)) {
@@ -1618,9 +1623,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           try {
             const fs = await import('node:fs');
             const path = await import('node:path');
-            const { homedir } = await import('node:os');
 
-            const configPath = path.join(homedir(), '.sc-agent', 'config.json');
+            const configPath = getGlobalConfigPath();
 
             // Ensure directory exists
             const configDir = path.dirname(configPath);
@@ -1855,10 +1859,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         if (saveDefault.value) {
           try {
             const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-            const { join } = await import('node:path');
-            const { homedir } = await import('node:os');
-            const configPath = join(homedir(), '.sc-agent', 'config.json');
-            const configDir = join(homedir(), '.sc-agent');
+            const { dirname } = await import('node:path');
+            const configPath = getGlobalConfigPath();
+            const configDir = dirname(configPath);
             if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
             let cfg: Record<string, unknown> = {};
             if (existsSync(configPath)) cfg = JSON.parse(readFileSync(configPath, 'utf-8'));

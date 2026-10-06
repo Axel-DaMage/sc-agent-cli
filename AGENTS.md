@@ -108,7 +108,7 @@
 2. Global config (`~/.sc-agent/config.json`)
 3. Project config (`.sc-agent.json`)
 4. Active profile overrides
-5. Environment variables (SC_API_KEY, SC_MODEL, SC_BASE_URL, SC_PROFILE)
+5. Environment variables (SC_API_KEY, SC_MODEL, SC_BASE_URL, SC_PROFILE; SC_CONFIG_PATH relocates the global config file itself)
 
 ### Permission System
 
@@ -117,6 +117,7 @@
 - Blacklist profile: only dangerous commands ask (rm, sudo, del, etc.)
 - Session tracking: "Ask once" mode remembers per session
 - User can override with `-y` flag (auto-approve all)
+- **Unattended git guard**: under `-y`/`--permissions unlimited`, `run_shell` refuses git-mutating commands (`git checkout/restore/reset/clean/stash/add/commit/push/...`) — the dedicated `git` tool owns repo state; interactive mode is unaffected (#464)
 
 ### Error Recovery & Classification
 

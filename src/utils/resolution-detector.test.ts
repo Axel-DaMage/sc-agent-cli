@@ -147,7 +147,7 @@ test('detectSessionResolution: error', () => {
   assert.equal(res.exit_code, EXIT_CODES.ERROR);
 });
 
-test('countFilesChanged: calculates files changed from git status and tool calls', () => {
+test('countFilesChanged: counts real git diffs, not tool-call artifacts (#464)', () => {
   const history: Message[] = [
     {
       role: 'assistant',
@@ -173,6 +173,98 @@ test('countFilesChanged: calculates files changed from git status and tool calls
     history
   );
 
-  // src/a.ts, src/b.ts, src/c.ts -> 3 unique files
-  assert.equal(count, 3);
+  // src/a.ts and src/c.ts appear in the real worktree diff; src/b.ts is a
+  // session artifact (no matching diff — e.g. the edit was reverted) and is
+  // not counted.
+  assert.equal(count, 2);
+});
+
+test('countFilesChanged: a run whose edits were self-reverted reports 0 (#464)', () => {
+  // Dogfood failure shape: edit_file succeeded, then `git checkout -- .` left
+  // a clean tree — files_changed must be 0, not the count of tool-call paths.
+  const history: Message[] = [
+    {
+      role: 'assistant',
+      content: 'Applying the fix',
+      tool_calls: [
+        {
+          id: '1',
+          type: 'function',
+          function: { name: 'edit_file', arguments: JSON.stringify({ path: 'src/a.ts' }) },
+        },
+        {
+          id: '2',
+          type: 'function',
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/new.ts' }) },
+        },
+      ],
+    },
+  ];
+
+  const count = countFilesChanged(
+    { status: '', head: 'h1' },
+    { status: '', head: 'h1' },
+    history,
+    '/repo'
+  );
+
+  assert.equal(count, 0);
+});
+
+test('countFilesChanged: excludes engine session artifacts from the diff (#464)', () => {
+  // --audit-log / --summary-file paths written inside the worktree are engine
+  // artifacts, not repo diffs.
+  const count = countFilesChanged(
+    { status: '', head: 'h1', root: '/repo' },
+    { status: '?? audit.jsonl\n?? run.json\n M src/app.ts', head: 'h1', root: '/repo' },
+    undefined,
+    '/repo',
+    ['/repo/audit.jsonl', '/repo/run.json']
+  );
+
+  assert.equal(count, 1); // only src/app.ts
+});
+
+test('countFilesChanged: falls back to tool-call paths when git state is unavailable', () => {
+  const history: Message[] = [
+    {
+      role: 'assistant',
+      content: 'Writing files',
+      tool_calls: [
+        {
+          id: '1',
+          type: 'function',
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/x.ts' }) },
+        },
+        {
+          id: '2',
+          type: 'function',
+          function: { name: 'edit_file', arguments: JSON.stringify({ path: 'src/y.ts' }) },
+        },
+      ],
+    },
+  ];
+
+  // Non-git workspace: no git state captured, tool calls are the only signal.
+  const count = countFilesChanged(null, null, history, '/repo');
+  assert.equal(count, 2);
+});
+
+test('detectSessionResolution: reports no_changes when only engine artifacts differ (#464)', () => {
+  const history: Message[] = [
+    { role: 'user', content: 'Summarize the repo' },
+    { role: 'assistant', content: 'This is a provider-agnostic CLI agent.' },
+  ];
+
+  const res = detectSessionResolution({
+    history,
+    beforeGitState: { status: '', head: 'h1', root: '/repo' },
+    afterGitState: { status: '?? run-manifest.json', head: 'h1', root: '/repo' },
+    workspaceRoot: '/repo',
+    excludePaths: ['/repo/run-manifest.json'],
+  });
+
+  assert.equal(res.files_changed, 0);
+  assert.equal(res.resolution, 'no_changes');
+  assert.equal(res.exit_code, EXIT_CODES.NO_CHANGES);
 });

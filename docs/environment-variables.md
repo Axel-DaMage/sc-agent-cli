@@ -247,6 +247,20 @@ Remote-env marker **set automatically** by `devcontainer exec` — it marks that
 
 ---
 
+### SC_CONFIG_PATH
+
+Overrides the location of the global config file. Reads (`loadConfig`) and writes (`saveConfig`, `sc config-init`, `/profile` defaults) all honor it. Useful for tests, CI, and containers that must not touch the host's `~/.sc-agent/config.json`.
+
+**Default:** `~/.sc-agent/config.json`
+
+```bash
+# Run the agent against a throwaway config
+export SC_CONFIG_PATH=/tmp/sc-agent/config.json
+scc chat
+```
+
+---
+
 ## Complete Examples
 
 ### Development (Local Ollama)

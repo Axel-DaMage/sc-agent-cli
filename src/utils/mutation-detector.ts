@@ -4,6 +4,10 @@ import type { Message } from '../core/types.js';
 export interface WorkspaceGitState {
   status: string;
   head: string;
+  /** Repo top-level from `git rev-parse --show-toplevel` — porcelain status
+   *  paths are repo-root-relative and resolve against this. Undefined when the
+   *  repo root cannot be determined. */
+  root?: string;
 }
 
 export interface MutationDetectionResult {
@@ -35,9 +39,18 @@ export function getWorkspaceGitState(workspaceRoot: string): WorkspaceGitState |
       stdio: ['ignore', 'pipe', 'ignore'],
     });
 
+    const rootRes = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: workspaceRoot,
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const root = rootRes.status === 0 ? (rootRes.stdout || '').trim() : '';
+
     return {
       status: (statusRes.stdout || '').trim(),
       head: headRes.status === 0 ? (headRes.stdout || '').trim() : '',
+      ...(root ? { root } : {}),
     };
   } catch {
     return null;

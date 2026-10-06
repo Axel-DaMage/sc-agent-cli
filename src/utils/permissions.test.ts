@@ -145,6 +145,78 @@ test('denyGitMutation off: git commands unaffected', async () => {
   assert.equal(await requestPermission({ toolName: 'git', args: { operation: 'commit', message: 'x' }, config }), true);
 });
 
+// ── Unattended git-mutation guard (#464) ──
+// In unattended runs (-y / --permissions unlimited) the `git` tool owns repo
+// state — run_shell git mutations are refused so the model cannot silently
+// revert its own edits (git checkout -- ., reset --hard, stash, ...).
+
+test('unattended run_shell refuses git-mutating commands with a clear refusal', async () => {
+  const cmds = [
+    'git checkout -- .',
+    'git checkout .',
+    'git restore src/a.ts',
+    'git restore --staged .',
+    'git reset --hard HEAD',
+    'git clean -fd',
+    'git stash',
+    'git stash pop',
+    'git revert HEAD',
+    'git commit -m x',
+    'git push origin main',
+    'git checkout -b feat',
+    'cd src && git checkout -- .',
+  ];
+  for (const cmd of cmds) {
+    await assert.rejects(
+      requestPermission({ toolName: 'run_shell', args: { command: cmd }, config: baseConfig, autoApprove: true }),
+      /refused.*unattended mode.*`git` tool/s,
+      cmd
+    );
+  }
+});
+
+test('unattended run_shell still allows read-only git and non-git commands', async () => {
+  const cmds = [
+    'git status',
+    'git diff --stat',
+    'git log --oneline',
+    'git show HEAD',
+    'git branch',
+    'git tag',
+    'git remote -v',
+    'ls -la',
+    'npm test',
+  ];
+  for (const cmd of cmds) {
+    assert.equal(
+      await requestPermission({ toolName: 'run_shell', args: { command: cmd }, config: baseConfig, autoApprove: true }),
+      true,
+      cmd
+    );
+  }
+});
+
+test('unattended git tool operations are unaffected (git tool owns repo state)', async () => {
+  for (const op of ['status', 'diff', 'log', 'show', 'branch', 'add', 'commit']) {
+    assert.equal(
+      await requestPermission({ toolName: 'git', args: { operation: op, message: 'x' }, config: baseConfig, autoApprove: true }),
+      true,
+      op
+    );
+  }
+});
+
+test('interactive mode keeps current behavior — git mutations still prompt/allow', async () => {
+  // No autoApprove flag → interactive flow (prompts mocked to approve).
+  for (const cmd of ['git checkout -- .', 'git reset --hard HEAD', 'git stash', 'git commit -m x']) {
+    assert.equal(
+      await requestPermission({ toolName: 'run_shell', args: { command: cmd }, config: baseConfig }),
+      true,
+      cmd
+    );
+  }
+});
+
 test('requestPermission allows non-denied run_shell command', async () => {
   const config: ProjectConfig = {
     ...baseConfig,

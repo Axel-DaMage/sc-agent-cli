@@ -469,3 +469,11 @@ In unattended runs (`-y` / `--permissions unlimited`), a prompt that requests wo
 - **Worktree check:** the guard also compares git status before/after the run, so writes made through unclassified shell paths still count as mutations and are never re-prompted.
 - **No-change verdict honored:** an explicit verdict ("no changes required", "already implemented", "nothing to commit") completes the turn immediately — `SCC_NO_CHANGES` / exit `10` remains the contract for genuine no-op runs.
 - **Scope:** only mutation-scoped prompts in unattended mode. Interactive sessions and read-only prompts (summarize, explain, list) complete without re-prompting.
+
+## Unattended Git Guard
+
+In unattended runs (`-y` / `--permissions unlimited`) the dedicated `git` tool owns repo state: `run_shell` refuses git-mutating commands (`git checkout --`, `git restore`, `git reset --hard`, `git clean -f`, `git stash`, `git commit`, `git push`, `git pull`, `git rebase`, `git merge`, `git switch`, …) with a refusal routed back to the model. This prevents the model from silently reverting its own edits — e.g. interpreting "do not commit" as `git checkout -- .` — and keeps all repo-state operations on the audited `git` tool (`status`/`diff`/`log`/`show`/`branch`/`add`/`commit`/`format`).
+
+Corollary: the manifest's `files_changed` counts the **real worktree diff** — `git status --porcelain` after the run plus files in commits created during the run — excluding engine artifacts (`--summary-file`, `--output-file`, `--audit-log` paths inside the worktree). A run that reverted all its edits, or only produced session artifacts, reports `files_changed: 0`.
+
+Interactive sessions are unaffected: commands still prompt a human supervisor. To hard-block git mutations in every mode (orchestrators that own git state externally), use `--no-commit` / `permissions.denyGitMutation`.

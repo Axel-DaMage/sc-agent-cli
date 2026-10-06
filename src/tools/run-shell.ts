@@ -9,7 +9,7 @@ export const runShellTool: Tool = {
     type: 'function',
     function: {
       name: 'run_shell',
-      description: 'Execute a shell command (requires explicit permission)',
+      description: 'Execute a shell command (requires explicit permission). Git-mutating commands (checkout, restore, reset, clean, stash, add, commit, push, ...) are refused in unattended mode — use the dedicated git tool for repo state.',
       parameters: {
         type: 'object',
         properties: {

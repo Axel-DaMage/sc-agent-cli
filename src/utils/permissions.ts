@@ -74,6 +74,12 @@ const GIT_MUTATION_DENIED =
   'Git mutations are managed externally (--no-commit / permissions.denyGitMutation). ' +
   'Make filesystem edits only — do not run git add/commit/checkout/push or any git-mutating command.';
 
+const GIT_MUTATION_UNATTENDED_DENIED =
+  'Git-mutating commands via run_shell are refused in unattended mode (-y / --permissions unlimited) — ' +
+  'the dedicated `git` tool owns repo state (use it for status/diff/log/show/branch/add/commit/format). ' +
+  'Do not run git checkout/restore/reset/clean/stash or any other git-mutating command via run_shell: ' +
+  'they can silently revert your own edits before the run ends.';
+
 export async function requestPermission(ctx: PermissionContext): Promise<boolean> {
   // Hard deny first: permissions.denyCommands is a non-interactive blocklist
   // that applies to run_shell in every mode — including -y/autoApprove.
@@ -103,6 +109,19 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
       if (gitOp) {
         throw new Error(`${gitOp} denied. ${GIT_MUTATION_DENIED}`);
       }
+    }
+  }
+
+  // Hard deny: in unattended runs (-y / --permissions unlimited) the `git` tool
+  // owns repo state. A run_shell `git checkout -- .`, `git restore`, `git reset
+  // --hard`, `git clean -f`, or `git stash` can silently revert the model's own
+  // edits before commit time (#464). Interactive mode is unaffected — the
+  // human approves each command.
+  if (ctx.autoApprove && ctx.toolName === 'run_shell') {
+    const command = (ctx.args.command as string) || '';
+    const gitOp = isGitMutatingCommand(command);
+    if (gitOp) {
+      throw new Error(`${gitOp} refused. ${GIT_MUTATION_UNATTENDED_DENIED}`);
     }
   }
 

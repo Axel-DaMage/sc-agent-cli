@@ -3,8 +3,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { ProjectConfig } from './types.js';
 
-const CONFIG_DIR = path.join(homedir(), '.sc-agent');
-const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+const DEFAULT_CONFIG_DIR = path.join(homedir(), '.sc-agent');
+const DEFAULT_CONFIG_PATH = path.join(DEFAULT_CONFIG_DIR, 'config.json');
 
 const DEFAULT_CONFIG: ProjectConfig = {
   model: {
@@ -77,7 +77,7 @@ export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
   let config = structuredClone(DEFAULT_CONFIG);
 
   // Load global config
-  config = await mergeConfigFile(config, CONFIG_PATH, 'global');
+  config = await mergeConfigFile(config, getGlobalConfigPath(), 'global');
 
   // Load project-local config if in a project
   if (projectRoot) {
@@ -166,14 +166,17 @@ export function validateConfig(config: ProjectConfig): void {
 }
 
 export function getGlobalConfigPath(): string {
-  return CONFIG_PATH;
+  // SC_CONFIG_PATH lets callers (tests, containers, CI) relocate the global
+  // config file so loadConfig never reads the host's ~/.sc-agent/config.json.
+  const override = process.env.SC_CONFIG_PATH?.trim();
+  return override || DEFAULT_CONFIG_PATH;
 }
 
 export async function saveConfig(config: ProjectConfig, global = true): Promise<void> {
-  const targetPath = global ? CONFIG_PATH : path.join(process.cwd(), '.sc-agent.json');
+  const targetPath = global ? getGlobalConfigPath() : path.join(process.cwd(), '.sc-agent.json');
 
   if (global) {
-    await mkdir(CONFIG_DIR, { recursive: true });
+    await mkdir(path.dirname(targetPath), { recursive: true });
   }
 
   await writeFile(targetPath, JSON.stringify(config, null, 2), 'utf-8');
@@ -184,8 +187,9 @@ export async function initConfig(force = false): Promise<void> {
   if (!force) {
     try {
       const fs = await import('fs');
-      if (fs.existsSync(CONFIG_PATH)) {
-        throw new Error(`Config already exists at ${CONFIG_PATH}. Use --force to overwrite.`);
+      const configPath = getGlobalConfigPath();
+      if (fs.existsSync(configPath)) {
+        throw new Error(`Config already exists at ${configPath}. Use --force to overwrite.`);
       }
     } catch (err: unknown) {
       if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
