@@ -4,6 +4,7 @@ import type { Message } from '../core/types.js';
 import { ProviderFailoverError, type CandidateAttempt } from '../core/failover.js';
 import { EXIT_CODES, classifyError } from './exit-codes.js';
 import type { DevcontainerRunInfo } from '../core/devcontainer.js';
+import type { ResolutionResult } from './resolution-detector.js';
 import { verboseError } from './verbose-logger.js';
 
 /**
@@ -68,6 +69,10 @@ export interface RunManifest {
   /** ProviderErrorClass + per-candidate attempt trace when the failover chain exhausted. */
   errorClass?: string;
   attempts?: CandidateAttempt[];
+  /** Human/machine reason for the terminal resolution (#446). */
+  resolution_reason?: string;
+  /** Unique workspace files the run touched (git status/diff + tool calls). */
+  files_changed?: number;
 }
 
 const FINAL_MESSAGE_MAX = 4000;
@@ -91,6 +96,8 @@ export interface RunManifestInput {
   provider?: string | null;
   /** Raw run error — used to derive terminalResolution/errorClass/attempts. */
   errorObj?: unknown;
+  /** Detected terminal resolution (#446) — supersedes the exitReason mapping when present. */
+  resolutionInfo?: ResolutionResult;
 }
 
 export function buildRunManifest(input: RunManifestInput): RunManifest {
@@ -116,8 +123,11 @@ export function buildRunManifest(input: RunManifestInput): RunManifest {
     error: input.error ?? null,
     ...(input.devcontainer ? { devcontainer: input.devcontainer } : {}),
     provider: input.provider ?? null,
-    resolution: input.exitReason === 'success' ? 'completed' : input.exitReason,
+    resolution: input.resolutionInfo?.resolution ?? (input.exitReason === 'success' ? 'completed' : input.exitReason),
     ...(input.errorObj ? errorFields(input.errorObj) : {}),
+    ...(input.resolutionInfo
+      ? { resolution_reason: input.resolutionInfo.resolution_reason, files_changed: input.resolutionInfo.files_changed }
+      : {}),
   };
 }
 

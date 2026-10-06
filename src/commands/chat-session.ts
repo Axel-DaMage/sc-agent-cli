@@ -27,6 +27,7 @@ import { resolveSettings } from '../utils/settings.js';
 import { verbose, verboseSession, verboseError } from '../utils/verbose-logger.js';
 import { getWorkspaceGitState, detectSessionMutations, countMutatingToolCalls } from '../utils/mutation-detector.js';
 import { buildRunManifest, emitRunManifest, type RunExitReason } from '../utils/run-manifest.js';
+import { detectSessionResolution } from '../utils/resolution-detector.js';
 
 // Multi-line input handler: Enter=submit, Shift+Enter=newline, paste inserts verbatim
 function readUserInput(history: string[], workspaceRoot: string): Promise<string> {
@@ -633,6 +634,29 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   // #415/#399: machine-readable run manifest — emitted as the LAST stdout
   // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
   // With `--output-format json` it is the ONLY stdout write.
+  // Resolution detector inputs — hoisted to this scope so the shared
+  // emitUsageSummary closure (incl. signal-handler early exits) can read
+  // whatever the batch block has populated so far (#446).
+  let batchGitStateBefore: ReturnType<typeof getWorkspaceGitState> | null = null;
+  let agentError: Error | undefined;
+  let budgetExceeded: string | null | undefined;
+
+  const detectResolutionSafely = (exitReason: RunExitReason) => {
+    try {
+      return detectSessionResolution({
+        history,
+        exitReason,
+        agentError,
+        budgetExceeded,
+        beforeGitState: batchGitStateBefore,
+        afterGitState: getWorkspaceGitState(options.workspaceRoot),
+        workspaceRoot: options.workspaceRoot,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+
   const emitUsageSummary = (exitReason: RunExitReason, error?: string, onStdoutFlushed?: () => void) => {
     const usage = agent.tokenTracker.getUsage();
     const stats = agent.getStats();
@@ -653,6 +677,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       durationMs: Date.now() - batchStart,
       checkpointPath: existsSync(checkpointPath) ? checkpointPath : null,
       devcontainer: options.devcontainer,
+      resolutionInfo: detectResolutionSafely(exitReason),
     });
     emitRunManifest(manifest, {
       files: [options.summaryFile, options.outputFile],
@@ -722,8 +747,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     batchStart = Date.now();
     // Snapshot git state before the agent runs — mutations made via run_shell
     // or unclassified tools are caught by comparing status/HEAD afterwards.
-    const batchGitStateBefore = getWorkspaceGitState(options.workspaceRoot);
-    let agentError: Error | undefined;
+    batchGitStateBefore = getWorkspaceGitState(options.workspaceRoot);
     try {
       history = await agent.run(userInput, history);
     } catch (err: any) {
@@ -802,7 +826,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     // Budget exhaustion: run stopped early but gracefully — emit a
     // machine-greppable marker + distinct exit code (22 per #409 sketch),
     // preserving the partial-work summary instead of a SIGKILL.
-    const budgetExceeded = agent.getStats().budgetExceeded;
+    budgetExceeded = agent.getStats().budgetExceeded;
     if (budgetExceeded) {
       saveSessionStatus('budget_exceeded', `budget:${budgetExceeded}`, history);
       markerOut(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
