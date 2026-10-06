@@ -119,3 +119,24 @@ test('emitRunManifest skips unwritable file paths without breaking stdout', () =
   }
   assert.equal(written.length, 1);
 });
+
+test('buildRunManifest emits the context_budget block when provided (#422)', () => {
+  const contextBudget = {
+    budget_tokens: 100,
+    requested_tokens: 130,
+    injected_tokens: 100,
+    over_budget: true,
+    sources: [
+      { source: 'system', tokens_requested: 100, tokens_injected: 100, truncated: false, dropped: false },
+      { source: 'memory', tokens_requested: 30, tokens_injected: 0, truncated: true, dropped: true },
+    ],
+  };
+  const m = buildRunManifest(baseInput({ contextBudget }));
+  assert.deepEqual(m.context_budget, contextBudget);
+  assert.equal(JSON.parse(JSON.stringify(m)).context_budget.budget_tokens, 100);
+});
+
+test('buildRunManifest omits context_budget when no report exists', () => {
+  assert.ok(!('context_budget' in buildRunManifest(baseInput())));
+  assert.ok(!('context_budget' in buildRunManifest(baseInput({ contextBudget: null }))));
+});

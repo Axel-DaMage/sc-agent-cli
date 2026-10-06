@@ -17,7 +17,7 @@ const MODEL_COSTS: Record<string, TokenCost> = {
 };
 
 const DEFAULT_COST: TokenCost = { inputCostPer1K: 0.002, outputCostPer1K: 0.008 };
-const CHARS_PER_TOKEN = 4;
+export const CHARS_PER_TOKEN = 4;
 
 export function estimateTokens(text: string): number {
   if (!text) return 0;

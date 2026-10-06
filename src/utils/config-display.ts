@@ -42,6 +42,7 @@ export async function showConfig(
   const envProfile = process.env.SC_PROFILE;
   const envMaxIter = process.env.SC_MAX_ITERATIONS;
   const envMaxStorage = process.env.SC_MAX_STORAGE_GB;
+  const envContextBudget = process.env.SC_CONTEXT_BUDGET_TOKENS;
 
   // ── Model ──
   section('Model');
@@ -62,6 +63,7 @@ export async function showConfig(
   if (envProfile) overrides.push('SC_PROFILE');
   if (envMaxIter) overrides.push('SC_MAX_ITERATIONS');
   if (envMaxStorage) overrides.push('SC_MAX_STORAGE_GB');
+  if (envContextBudget) overrides.push('SC_CONTEXT_BUDGET_TOKENS');
 
   if (overrides.length > 0) {
     section('Environment Overrides');
@@ -143,6 +145,7 @@ export async function showConfig(
   console.log(` ${chalk.white('SC_PROFILE'.padEnd(22))} ${chalk.gray('Active profile name')}`);
   console.log(` ${chalk.white('SC_MAX_ITERATIONS'.padEnd(22))} ${chalk.gray('Max agent loop iterations (default: 100)')}`);
   console.log(` ${chalk.white('SC_MAX_STORAGE_GB'.padEnd(22))} ${chalk.gray('Storage limit in GB (default: 1)')}`);
+  console.log(` ${chalk.white('SC_CONTEXT_BUDGET_TOKENS'.padEnd(22))} ${chalk.gray('System-prompt injection cap in est. tokens (default: uncapped)')}`);
 
   console.log();
 }

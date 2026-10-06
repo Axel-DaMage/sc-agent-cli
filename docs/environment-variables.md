@@ -111,6 +111,33 @@ scc chat -yq 'implement issue #446'
 
 ---
 
+### SC_CONTEXT_BUDGET_TOKENS
+
+Caps the estimated size of the assembled system-prompt injection — the base system prompt plus shell guide, repo profile, project context (`AGENTS.md`/`CLAUDE.md`/policy file), persistent memories, and the non-interactive note. Tokens are estimated with the shared chars/4 heuristic.
+
+**Default:** unset (no cap; per-source spend is still accounted in the run manifest)
+
+When the assembly exceeds the cap, sources are trimmed deterministically — lowest priority first:
+
+1. `memory` — persistent cross-session memories
+2. `repo_profile` — probed toolchain hints
+3. `project_context` — `AGENTS.md` / `CLAUDE.md` / policy file
+4. `shell` — shell environment guide
+5. `non_interactive` — auto-approve note (only present with `-y`)
+6. `system` — base system prompt (trimmed last, never fully dropped)
+
+A source whose full size exceeds the remaining overflow is truncated (head kept, `[... context source "X" trimmed ...]` marker appended); a source entirely covered by the overflow is dropped. Trims are never silent: a visible warning is printed, a `[CONTEXT_BUDGET]` line is emitted under `-v`, an audit event is recorded (with `--audit-log`), and the run manifest carries a `context_budget` block with `budget_tokens`, `requested_tokens`, `injected_tokens`, `over_budget`, and per-source `tokens_requested`/`tokens_injected`/`truncated`/`dropped`.
+
+The manifest's `context_budget.sources` also carries a cumulative `tool_outputs` line — estimated tokens of tool results injected into the conversation during the run (tool outputs are bounded by the >10KB auto-compressor and history pruning, not by this cap).
+
+```bash
+# Keep the injected context under ~8k estimated tokens
+export SC_CONTEXT_BUDGET_TOKENS=8000
+scc chat -yq 'implement issue #422'
+```
+
+---
+
 ### SC_MAX_ITERATIONS
 
 Controls the maximum number of agent iterations before stopping. Each iteration consists of:

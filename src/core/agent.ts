@@ -14,7 +14,14 @@ import type { ShellInfo } from '../utils/shell-env.js';
 import { renderInline } from '../utils/markdown-renderer.js';
 import { enhanceError, formatEnhancedError } from '../utils/error-enhancer.js';
 import { boxHeader, boxFooter } from '../utils/box-drawing.js';
-import { TokenTracker, estimateMessageTokens } from '../utils/token-tracker.js';
+import { TokenTracker, estimateMessageTokens, estimateTokens } from '../utils/token-tracker.js';
+import {
+  applyContextBudget,
+  formatContextBudgetTrims,
+  resolveContextBudget,
+  type ContextBudgetReport,
+  type ContextSource,
+} from '../utils/context-budget.js';
 import { saveCheckpoint } from '../utils/checkpoint.js';
 import { AuditLogger } from '../utils/audit-log.js';
 import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
@@ -738,6 +745,7 @@ export class Agent {
   private _sessionId: string = '';
   private audit?: AuditLogger;
   private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
+  private _contextBudgetReport: ContextBudgetReport | null = null;
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
@@ -779,6 +787,58 @@ export class Agent {
   /** "provider/model" label of the failover candidate serving this run (#425). */
   getProviderUsed(): string | null {
     return this.provider.providerUsed;
+  }
+
+  /**
+   * Per-source context-spend accounting for the system-prompt injection
+   * of the current run (#422). Null until the first run() assembles or
+   * accounts the system message.
+   */
+  getContextBudget(): ContextBudgetReport | null {
+    return this._contextBudgetReport;
+  }
+
+  /**
+   * Oversized injections are never silent (#422): surface a visible
+   * warning, a verbose detail line, and an audit event when the
+   * SC_CONTEXT_BUDGET_TOKENS guard trimmed or dropped a source.
+   */
+  private reportContextBudget(report: ContextBudgetReport): void {
+    if (!report.over_budget) return;
+    const trims = formatContextBudgetTrims(report);
+    this.log(chalk.yellow(
+      `\n  ⚠️  Context budget ${report.budget_tokens} est. tokens exceeded ` +
+      `(${report.requested_tokens} requested → ${report.injected_tokens} injected) — trimmed: ${trims}`
+    ));
+    verbose(`[CONTEXT_BUDGET] ${JSON.stringify(report)}`, 2);
+    this.audit?.emit({
+      type: 'context_budget',
+      budget_tokens: report.budget_tokens,
+      requested_tokens: report.requested_tokens,
+      injected_tokens: report.injected_tokens,
+      trimmed: report.sources.filter(s => s.truncated).map(s => s.source),
+    });
+  }
+
+  /**
+   * Tool outputs are a context source too (#422): accumulate their spend
+   * in the report. The injection cap does not apply here — oversized
+   * results are already trimmed by the >10KB auto-compressor (and older
+   * entries by message compression/pruning) — `truncated` reflects that.
+   */
+  private recordToolOutputSpend(requestedTokens: number, injectedTokens: number): void {
+    const report = this._contextBudgetReport;
+    if (!report) return;
+    let spend = report.sources.find(s => s.source === 'tool_outputs');
+    if (!spend) {
+      spend = { source: 'tool_outputs', tokens_requested: 0, tokens_injected: 0, truncated: false, dropped: false };
+      report.sources.push(spend);
+    }
+    spend.tokens_requested += requestedTokens;
+    spend.tokens_injected += injectedTokens;
+    spend.truncated = spend.tokens_injected < spend.tokens_requested;
+    report.requested_tokens += requestedTokens;
+    report.injected_tokens += injectedTokens;
   }
 
   /** Failed-attempt records from the last provider call (failover manifest). */
@@ -901,22 +961,49 @@ export class Agent {
       const shellContext = `\n# Shell Environment\n- Type: ${shellInfo.type}\n- Platform: ${process.platform}\n- Tips:\n${shellInfo.tips.map(t => `  • ${t}`).join('\n')}`;
       const shellPromptGuide = getShellPromptSections(shellInfo);
 
-      const contextParts = [this.systemPrompt, shellContext, shellPromptGuide];
-      if (repoProfileContext) contextParts.push(repoProfileContext);
-      if (projectContext) contextParts.push(`\n# Project Context\n${projectContext}`);
-      if (memoryContext) contextParts.push(memoryContext);
+      // Named injection sources so context spend is accounted per source
+      // (#422). Assembly order is preserved for the final join; the
+      // budget guard trims in CONTEXT_SOURCE_PRIORITY order instead.
+      const contextSources: ContextSource[] = [
+        { source: 'system', text: this.systemPrompt },
+        { source: 'shell', text: `${shellContext}\n${shellPromptGuide}` },
+      ];
+      if (repoProfileContext) contextSources.push({ source: 'repo_profile', text: repoProfileContext });
+      if (projectContext) contextSources.push({ source: 'project_context', text: `\n# Project Context\n${projectContext}` });
+      if (memoryContext) contextSources.push({ source: 'memory', text: memoryContext });
       if (this.options.autoApprove) {
-        contextParts.push(`
+        contextSources.push({
+          source: 'non_interactive',
+          text: `
 # Non-Interactive Mode (Auto-Approve Active)
 - **YOU HAVE UNLIMITED PERMISSION**: The user has run the tool with auto-approval enabled (-y / -yq).
 - **DO NOT ASK FOR PERMISSION**: Do not ask the user "Would you like me to...", "Should I...", "Do you want me to...", or wait for instructions.
 - **TAKE ACTION IMMEDIATELY**: Modify files, run shell commands, write patches, push commits, and complete the tasks autonomously.
 - **DO NOT PROPOSE AND STOP**: If you know how to fix it, do it right now using the tools.
-`);
+`,
+        });
       }
 
-      const fullSystemPrompt = contextParts.join('\n');
+      const budgeted = applyContextBudget(contextSources, resolveContextBudget());
+      this._contextBudgetReport = budgeted.report;
+      this.reportContextBudget(budgeted.report);
+
+      const fullSystemPrompt = budgeted.texts.join('\n');
       messages.unshift({ role: 'system', content: fullSystemPrompt });
+    } else {
+      // Restored/resumed history already carries a system message — the
+      // injection guard still accounts for it (and re-trims it if the
+      // budget shrank since the original assembly).
+      const sysIndex = messages.findIndex((m) => m.role === 'system');
+      const budgeted = applyContextBudget(
+        [{ source: 'system', text: messages[sysIndex].content }],
+        resolveContextBudget(),
+      );
+      this._contextBudgetReport = budgeted.report;
+      if (budgeted.texts.length > 0 && budgeted.texts[0] !== messages[sysIndex].content) {
+        messages[sysIndex] = { ...messages[sysIndex], content: budgeted.texts[0] };
+        this.reportContextBudget(budgeted.report);
+      }
     }
 
     // Add user message
@@ -1315,9 +1402,13 @@ export class Agent {
           return `${start}\n\n[... Tool output compressed: ${content.length} chars → 8000 chars to prevent memory saturation ...]\n\n${end}`;
         }
 
-        // Push all results to messages
+        // Push all results to messages — and account tool-output context
+        // spend (#422): raw vs post-compression estimated tokens.
+        let toolOutRequested = 0;
+        let toolOutInjected = 0;
         for (let i = 0; i < toolResults.length; i++) {
           const result = toolResults[i];
+          toolOutRequested += estimateTokens(result.content);
           result.content = compressResult(result.content);
           if (i === toolResults.length - 1 && hasToolCallsWithoutContent) {
             // Append the nudge/instruction directly to the last tool result content.
@@ -1325,8 +1416,10 @@ export class Agent {
             // for picky API gateways (e.g. Anthropic, NVIDIA NIM) while still prompting the model for synthesis.
             result.content += '\n\n[Instruction: Analyze the tool results above. If the task is not yet complete, proceed with the next steps or tool calls to complete the task. Otherwise, summarize the results for the user in natural language. If there were errors, explain what happened and take action to fix them.]';
           }
+          toolOutInjected += estimateTokens(result.content);
           messages.push(result);
         }
+        this.recordToolOutputSpend(toolOutRequested, toolOutInjected);
 
         // Summary for multiple tools
         if (isMultiple) {

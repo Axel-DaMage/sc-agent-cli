@@ -156,6 +156,20 @@ sc chat -yq --output-format json --output-file run.json "add input validation"
 
 The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), budget exhaustion (`SC_BUDGET_EXCEEDED`), and signal interruption (`SIGINT` → exit 130, `SIGTERM` → exit 143, e.g. CI `timeout` kills) — always as the last stdout line, with `success:false` on failure exits.
 
+The manifest also carries a `context_budget` block (#422) with per-source context spend — the assembled system-prompt injection (`system`, `shell`, `repo_profile`, `project_context`, `memory`, `non_interactive`) plus a cumulative `tool_outputs` line for tool results injected during the run:
+
+```json
+"context_budget": {"budget_tokens": 8000, "requested_tokens": 12140,
+  "injected_tokens": 11440, "over_budget": true,
+  "sources": [
+    {"source":"system","tokens_requested":5400,"tokens_injected":5400,"truncated":false,"dropped":false},
+    {"source":"project_context","tokens_requested":3000,"tokens_injected":2600,"truncated":true,"dropped":false},
+    {"source":"memory","tokens_requested":300,"tokens_injected":0,"truncated":true,"dropped":true},
+    {"source":"tool_outputs","tokens_requested":3440,"tokens_injected":3440,"truncated":false,"dropped":false}]}
+```
+
+When `SC_CONTEXT_BUDGET_TOKENS` is set and the assembly exceeds it, sources are trimmed in the documented priority order (`memory` first, `system` last — never fully dropped) and `over_budget` is `true` with per-source `truncated`/`dropped` flags. Unset = no cap (`budget_tokens: null`); spend is still accounted. See `docs/environment-variables.md`.
+
 `--output-format json` requires a prompt (or `--prompt-file`); it is rejected for interactive sessions.
 
 When `--devcontainer` is used the manifest also carries a `devcontainer` block recording the resolved execution path:

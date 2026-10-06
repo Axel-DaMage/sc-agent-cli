@@ -66,12 +66,30 @@ test('loadConfig surfaces invalid project config JSON with file path and recover
   );
 });
 
-const ENV_KEYS = ['SC_BASE_URL', 'SC_MODEL', 'SC_PROFILE', 'SC_API_KEY', 'SC_CONFIG_PATH'] as const;
+// Every env var loadConfig consults, plus HOME/USERPROFILE so the global
+// config (~/.sc-agent/config.json) can be redirected to a scratch dir —
+// otherwise a real global config (e.g. an activeProfile) leaks into the tests.
+const ENV_KEYS = [
+  'SC_BASE_URL',
+  'SC_MODEL',
+  'SC_PROFILE',
+  'SC_API_KEY',
+  'SC_POLICY_FILE',
+  'SC_CONFIG_PATH',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'NVIDIA_API_KEY',
+  'HOME',
+  'USERPROFILE',
+] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(async () => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   for (const key of ENV_KEYS) delete process.env[key];
+  const fakeHome = await mkdtemp(path.join(tmpdir(), 'sc-agent-home-'));
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
   // Point the global config at a path guaranteed not to exist so loadConfig
   // never sees the machine's real ~/.sc-agent/config.json — an activeProfile
   // there would override merged model.* and break hermetic assertions.

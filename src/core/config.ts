@@ -3,8 +3,11 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { ProjectConfig } from './types.js';
 
-const DEFAULT_CONFIG_DIR = path.join(homedir(), '.sc-agent');
-const DEFAULT_CONFIG_PATH = path.join(DEFAULT_CONFIG_DIR, 'config.json');
+// Resolved lazily (not captured at module load) so callers/tests can isolate
+// the global config by redirecting HOME/USERPROFILE at runtime.
+function getGlobalConfigDir(): string {
+  return path.join(homedir(), '.sc-agent');
+}
 
 const DEFAULT_CONFIG: ProjectConfig = {
   model: {
@@ -169,7 +172,7 @@ export function getGlobalConfigPath(): string {
   // SC_CONFIG_PATH lets callers (tests, containers, CI) relocate the global
   // config file so loadConfig never reads the host's ~/.sc-agent/config.json.
   const override = process.env.SC_CONFIG_PATH?.trim();
-  return override || DEFAULT_CONFIG_PATH;
+  return override || path.join(getGlobalConfigDir(), 'config.json');
 }
 
 export async function saveConfig(config: ProjectConfig, global = true): Promise<void> {

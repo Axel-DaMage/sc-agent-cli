@@ -1,6 +1,7 @@
 import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { pruneMessageHistory, limitMessageHistory, Agent } from './agent.js';
+import { estimateTokens } from '../utils/token-tracker.js';
 import type { Message } from './types.js';
 
 test('Agent.run forwards configured non-streaming mode to the provider', async () => {
@@ -431,4 +432,133 @@ test('Agent.run does not count memory_write as a workspace mutation for the guar
 
   mock.mockRestore();
   memSpy.mockRestore();
+});
+
+// --- Context-spend accounting + injection budget guard (#422) ---
+
+test('Agent.run enforces SC_CONTEXT_BUDGET_TOKENS and exposes per-source spend', async () => {
+  const prev = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  process.env.SC_CONTEXT_BUDGET_TOKENS = '300';
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        }
+      }
+    });
+    const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: 'ok' }));
+    const result = await agent.run('test');
+    mock.mockRestore();
+
+    const report = agent.getContextBudget();
+    assert.ok(report, 'expected a context budget report after injection');
+    assert.equal(report.budget_tokens, 300);
+    assert.equal(report.over_budget, true);
+    assert.ok(report.injected_tokens <= report.requested_tokens);
+    for (const s of report.sources) {
+      assert.ok(s.tokens_injected <= s.tokens_requested, `${s.source} injected must not exceed requested`);
+    }
+
+    // The system prompt is trimmed last — it still lands in history with
+    // the visible trim marker (never silent).
+    const sys = result.find(m => m.role === 'system');
+    assert.ok(sys);
+    assert.match(sys.content, /context source "system" trimmed/);
+    assert.ok(estimateTokens(sys.content) <= 400);
+  } finally {
+    if (prev === undefined) delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+    else process.env.SC_CONTEXT_BUDGET_TOKENS = prev;
+  }
+});
+
+test('Agent.run records per-source context spend without a cap configured', async () => {
+  const prev = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        }
+      }
+    });
+    const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: 'ok' }));
+    const result = await agent.run('test');
+    mock.mockRestore();
+
+    const report = agent.getContextBudget();
+    assert.ok(report, 'expected a context budget report after injection');
+    assert.equal(report.budget_tokens, null);
+    assert.equal(report.over_budget, false);
+    assert.equal(report.injected_tokens, report.requested_tokens);
+    assert.ok(report.sources.some(s => s.source === 'system'));
+    assert.ok(report.sources.every(s => !s.truncated && !s.dropped));
+
+    const sys = result.find(m => m.role === 'system');
+    assert.ok(sys && sys.content.includes('helpful AI assistant'), 'system prompt passes through untrimmed');
+  } finally {
+    if (prev === undefined) delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+    else process.env.SC_CONTEXT_BUDGET_TOKENS = prev;
+  }
+});
+
+test('Agent.run accounts tool output context spend in the budget report', async () => {
+  const prev = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        }
+      }
+    });
+
+    const { readFileTool } = await import('../tools/read-file.js');
+    const readSpy = vi.spyOn(readFileTool, 'execute').mockResolvedValue('x'.repeat(400));
+
+    let callCount = 0;
+    const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          content: '',
+          tool_calls: [{
+            id: 'r1',
+            type: 'function' as const,
+            function: { name: 'read_file', arguments: JSON.stringify({ path: 'x.ts' }) },
+          }],
+        };
+      }
+      return { content: 'Done.' };
+    });
+
+    await agent.run('test');
+
+    const toolOut = agent.getContextBudget()?.sources.find(s => s.source === 'tool_outputs');
+    assert.ok(toolOut, 'expected a cumulative tool_outputs spend line');
+    // 'x'.repeat(400) ≈ 100 est. tokens; injected ≥ requested (synthesis nudge appended).
+    assert.ok(toolOut.tokens_requested >= 100);
+    assert.ok(toolOut.tokens_injected >= toolOut.tokens_requested);
+    assert.equal(toolOut.dropped, false);
+
+    mock.mockRestore();
+    readSpy.mockRestore();
+  } finally {
+    if (prev === undefined) delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+    else process.env.SC_CONTEXT_BUDGET_TOKENS = prev;
+  }
 });

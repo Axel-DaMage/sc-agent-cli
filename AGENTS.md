@@ -138,6 +138,7 @@
 - **Memory monitoring**: Heap usage checked every 10 iterations; warning at 80% usage
 - **Smart re-prompting**: Self-heal prompts include list of failed tools and "try a DIFFERENT approach" instructions
 - **Pagination**: `read_file` supports `offset` + `limit` for partial file reads
+- **Context budget guard**: `SC_CONTEXT_BUDGET_TOKENS` caps the assembled system-prompt injection; over-budget sources are trimmed deterministically (memory → repo_profile → project_context → shell → non_interactive → system, which is never dropped) and per-source spend lands in the run manifest `context_budget` block
 
 ### Phase 3 — Robusteza (Edge Cases & Hardening)
 
