@@ -391,6 +391,27 @@ Denied calls return a clear "git is managed externally" error so the model proce
 
 ---
 
+## Tool-Call Sandboxing (`sandbox.*`)
+
+Independent of permission profiles, the optional `sandbox` config block wraps every `run_shell` command in a boundary (filesystem scope, network egress allowlist, optional seccomp). It composes **additively** with the controls above — deny always wins:
+
+- `denyCommands` still rejects matching commands before the sandbox even spawns them.
+- Literal `denyPaths` are masked *inside* the sandbox mount namespace (tmpfs over dirs, `/dev/null` over files); glob deny entries keep working via `resolveSafePath`.
+- `sandbox.writablePaths`/`readOnlyPaths` can widen the fs boundary, but cannot un-deny a `denyPaths` entry.
+- Non-allowlisted egress is rejected by a loopback proxy and logged as a `sandbox_violation` (`{rule, target}`) — surfaced as a structured tool error, in the audit log, and in the run manifest.
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "egressAllowlist": ["api.github.com:443"],
+    "writablePaths": ["cache"],
+    "seccomp": true
+  }
+}
+```
+
+See [sandboxing.md](sandboxing.md) for the full profile schema and backend matrix.
 ## Unattended Git Guard (`-y` / `--permissions unlimited`)
 
 In unattended runs the dedicated `git` tool owns repo state: `run_shell` refuses **every** git-mutating command — `git checkout --`, `git restore`, `git reset --hard`, `git clean -f`, `git stash`, plus `add`/`commit`/`push`/`pull`/`rebase`/`merge`/`cherry-pick`/`revert`/`tag <args>`/`branch <args>`/`clone`/`init`/`fetch`/`mv`/`rm`/`am`/`apply`/`submodule`/`worktree`/`switch`/`checkout` (including inside `cd x && git …` chains). The refusal error is routed back to the model and steers it to the `git` tool for supported operations (`status`, `diff`, `log`, `show`, `branch`, `add`, `commit`, `format`).

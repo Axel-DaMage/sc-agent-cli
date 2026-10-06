@@ -32,5 +32,13 @@
       "rm -rf /",
       "curl * | *sh"
     ]
+  },
+  "sandbox": {
+    "_comment": "Opt-in tool-call sandboxing (#423). See docs/sandboxing.md. enabled defaults to false; empty egressAllowlist blocks all non-loopback egress; denyPaths/denyCommands still apply (deny wins).",
+    "enabled": false,
+    "egressAllowlist": ["api.github.com:443"],
+    "readOnlyPaths": [],
+    "writablePaths": ["cache"],
+    "seccomp": false
   }
 }

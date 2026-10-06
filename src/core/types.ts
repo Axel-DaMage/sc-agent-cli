@@ -46,6 +46,34 @@ export interface ModelConfig {
 export type PermissionProfile = 'traditional' | 'blacklist';
 
 /**
+ * Sandboxed execution profile for `run_shell` (#423).
+ *
+ * Semantics (per operator contract):
+ * - `enabled`: opt-in, default false. When unset the shell tool runs unsandboxed.
+ * - `egressAllowlist`: `host` or `host:port` entries (`*.` prefix matches a
+ *   domain and its subdomains; `*` allows all egress). Empty/absent list means
+ *   block-all egress except loopback.
+ * - `readOnlyPaths` / `writablePaths`: absolute (or workspace-relative) paths
+ *   layered over the default policy — workspace writable, everything else
+ *   read-only.
+ * - `seccomp`: request syscall filtering; only applied when the platform
+ *   supports it (Linux + bubblewrap). Optional `seccompProfile` points to a
+ *   raw cBPF blob (as produced by `seccomp_export_bpf`) replacing the built-in
+ *   denylist.
+ *
+ * Sandbox rules compose additively with `permissions.denyPaths` /
+ * `permissions.denyCommands`; deny always wins.
+ */
+export interface SandboxConfig {
+  enabled?: boolean;
+  egressAllowlist?: string[];
+  readOnlyPaths?: string[];
+  writablePaths?: string[];
+  seccomp?: boolean;
+  seccompProfile?: string;
+}
+
+/**
  * Multi-model orchestration roles (#424). Each role maps to a
  * "provider/model" token resolved with the SC_FAILOVER alias semantics
  * (profile name → known provider → model id on the configured endpoint).
@@ -70,6 +98,7 @@ export interface ProjectConfig {
     denyGitMutation?: boolean; // hard-block git-mutating ops (orchestrators own git state)
     profile?: PermissionProfile; // Permission behavior profile
   };
+  sandbox?: SandboxConfig; // Sandboxed execution for agent-spawned shell commands (#423)
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
   /**

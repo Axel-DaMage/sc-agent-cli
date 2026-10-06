@@ -3,11 +3,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { ProjectConfig } from './types.js';
 
-// Resolved lazily (not captured at module load) so callers/tests can isolate
-// the global config by redirecting HOME/USERPROFILE at runtime.
-function getGlobalConfigDir(): string {
-  return path.join(homedir(), '.sc-agent');
-}
+const CONFIG_DIR = path.join(homedir(), '.sc-agent');
+const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
 const DEFAULT_CONFIG: ProjectConfig = {
   model: {
@@ -76,11 +73,27 @@ const API_KEY_REQUIREMENTS = [
   },
 ] as const;
 
-export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
+export interface LoadConfigOptions {
+  /**
+   * Override the global config file (`~/.sc-agent/config.json`). `null` skips
+   * the global layer entirely — tests rely on this so a developer's real
+   * global config (e.g. an activeProfile) cannot leak into assertions.
+   */
+  globalConfigPath?: string | null;
+}
+
+export async function loadConfig(
+  projectRoot?: string,
+  options?: LoadConfigOptions
+): Promise<ProjectConfig> {
   let config = structuredClone(DEFAULT_CONFIG);
 
   // Load global config
-  config = await mergeConfigFile(config, getGlobalConfigPath(), 'global');
+  const globalConfigPath =
+    options?.globalConfigPath === undefined ? CONFIG_PATH : options.globalConfigPath;
+  if (globalConfigPath !== null) {
+    config = await mergeConfigFile(config, globalConfigPath, 'global');
+  }
 
   // Load project-local config if in a project
   if (projectRoot) {
@@ -135,6 +148,20 @@ export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
     config.settings.policyFile = envPolicyFile;
   }
 
+  // Override sandbox enablement (#423). SC_SANDBOX wins over config so CI
+  // runners can force the boundary on (or off) without editing config files.
+  const envSandbox = process.env.SC_SANDBOX;
+  if (envSandbox !== undefined && envSandbox.trim() !== '') {
+    const v = envSandbox.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(v)) {
+      config.sandbox = { ...config.sandbox, enabled: true };
+    } else if (['0', 'false', 'off', 'no'].includes(v)) {
+      config.sandbox = { ...config.sandbox, enabled: false };
+    } else {
+      throw new Error(`Invalid SC_SANDBOX value "${envSandbox}" (expected on/off, true/false, 1/0)`);
+    }
+  }
+
   // Validate required fields
   validateConfig(config);
 
@@ -166,20 +193,59 @@ export function validateConfig(config: ProjectConfig): void {
       `Set model.apiKey in config, ${missingApiKeyRule.envVar}, or SC_API_KEY.`
     );
   }
+
+  // Sandbox profile shape (#423). Semantics (host:port parsing) are enforced
+  // again at sandbox resolve time; here we fail fast on malformed structure.
+  const sandbox = config.sandbox;
+  if (sandbox !== undefined) {
+    if (sandbox === null || typeof sandbox !== 'object' || Array.isArray(sandbox)) {
+      throw new Error('Invalid sandbox config: expected an object');
+    }
+    if (sandbox.enabled !== undefined && typeof sandbox.enabled !== 'boolean') {
+      throw new Error('Invalid sandbox.enabled: expected a boolean');
+    }
+    if (sandbox.seccomp !== undefined && typeof sandbox.seccomp !== 'boolean') {
+      throw new Error('Invalid sandbox.seccomp: expected a boolean');
+    }
+    if (sandbox.seccompProfile !== undefined && typeof sandbox.seccompProfile !== 'string') {
+      throw new Error('Invalid sandbox.seccompProfile: expected a file path string');
+    }
+    for (const key of ['egressAllowlist', 'readOnlyPaths', 'writablePaths'] as const) {
+      const list = sandbox[key];
+      if (list === undefined) continue;
+      if (!Array.isArray(list) || list.some((e) => typeof e !== 'string' || !e.trim())) {
+        throw new Error(`Invalid sandbox.${key}: expected an array of non-empty strings`);
+      }
+    }
+    for (const entry of sandbox.egressAllowlist ?? []) {
+      // host | host:port | [v6] | [v6]:port | *.domain[:port] | *
+      const body = entry.trim();
+      if (/[\s/@]/.test(body)) {
+        throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": expected host or host:port`);
+      }
+      const portPart = /^\[[0-9a-fA-F:]+\]:(\d+)$/.exec(body)?.[1]
+        ?? (/^[^\[\]]*:(\d+)$/.test(body) ? body.slice(body.lastIndexOf(':') + 1) : undefined);
+      if (portPart !== undefined) {
+        const port = Number(portPart);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": port must be 1-65535`);
+        }
+      } else if (body.includes(':') && !body.startsWith('[') && (body.match(/:/g) ?? []).length === 1) {
+        throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": malformed port`);
+      }
+    }
+  }
 }
 
 export function getGlobalConfigPath(): string {
-  // SC_CONFIG_PATH lets callers (tests, containers, CI) relocate the global
-  // config file so loadConfig never reads the host's ~/.sc-agent/config.json.
-  const override = process.env.SC_CONFIG_PATH?.trim();
-  return override || path.join(getGlobalConfigDir(), 'config.json');
+  return CONFIG_PATH;
 }
 
 export async function saveConfig(config: ProjectConfig, global = true): Promise<void> {
-  const targetPath = global ? getGlobalConfigPath() : path.join(process.cwd(), '.sc-agent.json');
+  const targetPath = global ? CONFIG_PATH : path.join(process.cwd(), '.sc-agent.json');
 
   if (global) {
-    await mkdir(path.dirname(targetPath), { recursive: true });
+    await mkdir(CONFIG_DIR, { recursive: true });
   }
 
   await writeFile(targetPath, JSON.stringify(config, null, 2), 'utf-8');
@@ -190,9 +256,8 @@ export async function initConfig(force = false): Promise<void> {
   if (!force) {
     try {
       const fs = await import('fs');
-      const configPath = getGlobalConfigPath();
-      if (fs.existsSync(configPath)) {
-        throw new Error(`Config already exists at ${configPath}. Use --force to overwrite.`);
+      if (fs.existsSync(CONFIG_PATH)) {
+        throw new Error(`Config already exists at ${CONFIG_PATH}. Use --force to overwrite.`);
       }
     } catch (err: unknown) {
       if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {

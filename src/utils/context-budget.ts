@@ -35,6 +35,8 @@ export const CONTEXT_SOURCE_PRIORITY: Record<string, number> = {
   project_context: 30,
   shell: 40,
   non_interactive: 50,
+  // Sandbox boundary disclosure — policy-critical, trimmed last like system.
+  sandbox: 90,
   system: 100,
 };
 

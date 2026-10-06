@@ -27,6 +27,8 @@ import {
 import { saveCheckpoint } from '../utils/checkpoint.js';
 import { AuditLogger } from '../utils/audit-log.js';
 import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
+import { SandboxRuntime } from '../utils/sandbox.js';
+import type { SandboxViolation, SandboxRunInfo } from '../utils/sandbox.js';
 import { resolveThrottleConfig } from '../utils/throttle.js';
 import {
   getWorkspaceGitState,
@@ -772,6 +774,7 @@ export class Agent {
   private _sessionId: string = '';
   private audit?: AuditLogger;
   private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
+  private sandbox?: SandboxRuntime;
   private _contextBudgetReport: ContextBudgetReport | null = null;
 
   constructor(private options: AgentOptions) {
@@ -784,15 +787,6 @@ export class Agent {
       options.config.model.baseUrl
     );
     this.provider.setThrottleConfig(throttle);
-    this.toolContext = {
-      workspaceRoot: options.workspaceRoot,
-      config: options.config,
-      autoApprove: options.autoApprove,
-    };
-    this.systemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
-    this.shellInfo = detectShell();
-    this.tokenTracker = new TokenTracker(options.config.model.model);
-    this._sessionId = options.sessionId || '';
     if (options.auditLog) {
       try {
         this.audit = new AuditLogger(options.auditLog);
@@ -800,6 +794,30 @@ export class Agent {
         this.audit = undefined; // unwritable path must not block the run
       }
     }
+    // #423 — sandboxed run_shell execution. The runtime resolves the profile,
+    // probes the backend (bwrap/proxy-only), and streams violations into the
+    // audit log + run manifest. Fail-closed: sandbox setup errors abort the
+    // session rather than silently running commands outside the boundary.
+    if (options.config.sandbox?.enabled) {
+      this.sandbox = new SandboxRuntime({
+        config: options.config,
+        workspaceRoot: options.workspaceRoot,
+        onViolation: (v: SandboxViolation) => {
+          this.audit?.emit({ type: 'sandbox_violation', rule: v.rule, target: v.target });
+        },
+        onNotice: (msg) => this.log(chalk.yellow(`  ⚠ ${msg}`)),
+      });
+    }
+    this.toolContext = {
+      workspaceRoot: options.workspaceRoot,
+      config: options.config,
+      autoApprove: options.autoApprove,
+      sandbox: this.sandbox,
+    };
+    this.systemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+    this.shellInfo = detectShell();
+    this.tokenTracker = new TokenTracker(options.config.model.model);
+    this._sessionId = options.sessionId || '';
   }
 
   getStats(): { iterations: number; totalIterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
@@ -920,6 +938,16 @@ export class Agent {
   /** Failed-attempt records from the last provider call (failover manifest). */
   getFailoverAttempts(): CandidateAttempt[] {
     return this.provider.failoverAttempts;
+  }
+
+  /** Manifest-facing sandbox posture, or null when sandboxing is disabled (#423). */
+  getSandboxInfo(): SandboxRunInfo | null {
+    return this.sandbox?.enabled ? this.sandbox.getRunInfo() : null;
+  }
+
+  /** Structured sandbox violations observed this run (#423). */
+  getSandboxViolations(): SandboxViolation[] {
+    return this.sandbox ? [...this.sandbox.violations] : [];
   }
 
   /**
@@ -1073,6 +1101,22 @@ export class Agent {
 - **DO NOT PROPOSE AND STOP**: If you know how to fix it, do it right now using the tools.
 `,
         });
+      }
+      if (this.sandbox?.enabled) {
+        const info = this.sandbox.getRunInfo();
+        const egressDesc =
+          info.egress === 'block_all'
+            ? 'ALL network egress is blocked except loopback'
+            : `network egress is restricted to the configured allowlist (${this.sandbox.profile.egressRules
+                .map((r) => `${r.match === 'suffix' ? '*.' : ''}${r.host}${r.port !== null ? `:${r.port}` : ''}`)
+                .join(', ') || 'none'})`;
+        contextSources.push({ source: 'sandbox', text: `
+# Sandboxed Execution (Active)
+- run_shell commands execute inside a sandbox boundary (${info.exec_mode} backend${info.degraded_reason ? ` — DEGRADED: ${info.degraded_reason}` : ''}).
+- Filesystem: the workspace root is writable; paths outside the workspace are read-only unless sandbox.writablePaths grants access; permissions.denyPaths remain denied.
+- Network: ${egressDesc}.
+- Sandbox denials are reported as [SANDBOX_VIOLATION] tool errors — do NOT retry the blocked operation; choose an approach that stays inside the boundary.
+` });
       }
 
       const budgeted = applyContextBudget(contextSources, resolveContextBudget());

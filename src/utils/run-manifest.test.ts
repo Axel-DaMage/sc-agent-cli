@@ -154,6 +154,26 @@ test('emitRunManifest writes the manifest file and stdout line', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('buildRunManifest carries sandbox posture + violations (#423)', () => {
+  const m = buildRunManifest(
+    baseInput({
+      sandbox: { exec_mode: 'bwrap', egress: 'allowlist', seccomp: 'on', violations: 1 },
+      sandboxViolations: [{ rule: 'egress', target: 'evil.com:443' }],
+    }),
+  );
+  assert.deepEqual(m.sandbox, { exec_mode: 'bwrap', egress: 'allowlist', seccomp: 'on', violations: 1 });
+  assert.deepEqual(m.sandbox_violations, [{ rule: 'egress', target: 'evil.com:443' }]);
+  // Manifest must still serialize to a single JSON line.
+  assert.deepEqual(JSON.parse(JSON.stringify(m)).sandbox.exec_mode, 'bwrap');
+});
+
+test('buildRunManifest omits sandbox fields when sandboxing was not active', () => {
+  const m = buildRunManifest(baseInput({ sandboxViolations: [] }));
+  assert.equal(m.sandbox, undefined);
+  assert.equal(m.sandbox_violations, undefined);
+  assert.equal('sandbox' in m, false);
+});
+
 test('emitRunManifest skips unwritable file paths without breaking stdout', () => {
   const manifest = buildRunManifest(baseInput());
   const written: string[] = [];

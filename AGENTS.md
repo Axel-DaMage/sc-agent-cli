@@ -57,6 +57,9 @@
 - **`src/utils/token-tracker.ts`**: Token usage estimation and cost tracking
 - **`src/utils/checkpoint.ts`**: Execution state checkpointing for crash recovery
 - **`src/utils/run-manifest.ts`**: Machine-readable run manifest builder/emitter for headless batch runs (`--output-format json`, `--summary-file`, `--output-file`)
+- **`src/utils/sandbox.ts`**: Opt-in `run_shell` sandbox (#423) — `sandbox` config block, bwrap backend on Linux (mount/net namespaces, `--seccomp`), degraded egress-proxy mode elsewhere; violations surface as `[SANDBOX_VIOLATION]` tool errors + `sandbox_violation` audit events + manifest `sandbox`/`sandbox_violations` fields
+- **`src/utils/sandbox-proxy.ts`**: Loopback egress-filter proxy enforcing `sandbox.egressAllowlist` (CONNECT + HTTP forward)
+- **`src/utils/sandbox-seccomp.ts`**: cBPF denylist generator for bwrap `--seccomp` (x86_64) + `seccompProfile` blob loader
 
 ### Commands
 

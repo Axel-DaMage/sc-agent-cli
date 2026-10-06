@@ -4,6 +4,7 @@ import type { Message } from '../core/types.js';
 import { ProviderFailoverError, type CandidateAttempt } from '../core/failover.js';
 import { EXIT_CODES, classifyError } from './exit-codes.js';
 import type { DevcontainerRunInfo } from '../core/devcontainer.js';
+import type { SandboxRunInfo, SandboxViolation } from './sandbox.js';
 import type { AgentRole, PhaseRecord } from '../core/roles.js';
 import type { RoleTokenUsage } from './token-tracker.js';
 import type { ResolutionResult } from './resolution-detector.js';
@@ -96,6 +97,10 @@ export interface RunManifest {
    *  engine-owned artifacts. Tool-call records are only a fallback when the
    *  workspace is not a git repo (#464). */
   files_changed?: number;
+  /** Resolved sandbox posture when sandbox.enabled (#423). */
+  sandbox?: SandboxRunInfo;
+  /** Structured sandbox violations {rule, target} observed during the run (#423). */
+  sandbox_violations?: SandboxViolation[];
   /** Per-source context injection spend + SC_CONTEXT_BUDGET_TOKENS enforcement (#422). */
   context_budget?: ContextBudgetReport;
 }
@@ -128,6 +133,9 @@ export interface RunManifestInput {
   errorObj?: unknown;
   /** Detected terminal resolution (#446) — supersedes the exitReason mapping when present. */
   resolutionInfo?: ResolutionResult;
+  /** Sandbox posture + violation list from the agent's SandboxRuntime (#423). */
+  sandbox?: SandboxRunInfo;
+  sandboxViolations?: SandboxViolation[];
   /** Context-spend accounting from the injection budget guard (#422). */
   contextBudget?: ContextBudgetReport | null;
 }
@@ -171,6 +179,10 @@ export function buildRunManifest(input: RunManifestInput): RunManifest {
     ...(input.errorObj ? errorFields(input.errorObj) : {}),
     ...(input.resolutionInfo
       ? { resolution_reason: input.resolutionInfo.resolution_reason, files_changed: input.resolutionInfo.files_changed }
+      : {}),
+    ...(input.sandbox ? { sandbox: input.sandbox } : {}),
+    ...(input.sandboxViolations && input.sandboxViolations.length > 0
+      ? { sandbox_violations: input.sandboxViolations }
       : {}),
     ...(input.contextBudget ? { context_budget: input.contextBudget } : {}),
   };

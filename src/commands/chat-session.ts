@@ -697,6 +697,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       roleTokens: agent.tokenTracker.getRoleUsage(),
       cachedTokens: agent.tokenTracker.getCachedTokens(),
       resolutionInfo: detectResolutionSafely(exitReason),
+      sandbox: agent.getSandboxInfo() ?? undefined,
+      sandboxViolations: agent.getSandboxViolations(),
       contextBudget: agent.getContextBudget(),
     });
     emitRunManifest(manifest, {
