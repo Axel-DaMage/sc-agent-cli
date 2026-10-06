@@ -272,6 +272,48 @@ function buildCandidateModel(
 }
 
 /**
+ * Resolve a single "provider/model" alias token to a failover candidate —
+ * the shared semantics behind SC_FAILOVER entries (#425) and `roles` role
+ * mappings (#424):
+ *
+ *   * `provider` matches a name in `config.profiles` → that profile's
+ *     baseUrl/apiKey/etc. merge over `base`, with `model` set to the token's
+ *     model part.
+ *   * `provider` matches a known provider name (openai, anthropic, nvidia,
+ *     groq, together, ollama, lmstudio) → canonical base URL.
+ *   * Otherwise — a token with no "/" or a prefix matching neither — the
+ *     whole token is a model id on `base`'s endpoint (model ids may contain
+ *     "/", e.g. "meta/llama-3.3-70b").
+ *
+ * Returns null for degenerate tokens (empty model part on a resolved
+ * provider, or a trailing "/"). `base` defaults to the configured model;
+ * role routing passes the role candidate's model so bare tokens and
+ * credential isolation anchor to the role's endpoint.
+ */
+export function resolveModelToken(
+  config: ProjectConfig,
+  token: string,
+  base: ModelConfig = config.model,
+): FailoverCandidate | null {
+  if (!token || token.endsWith('/')) return null;
+  const slash = token.indexOf('/');
+  const providerName = slash > 0 ? token.slice(0, slash).trim() : '';
+  const profile = providerName ? config.profiles?.[providerName] : undefined;
+  if (profile || KNOWN_PROVIDER_BASE_URLS[providerName]) {
+    const modelId = token.slice(slash + 1).trim();
+    if (!modelId) return null;
+    return {
+      id: `${providerName}/${modelId}`,
+      model: buildCandidateModel(base, providerName, profile, modelId),
+    };
+  }
+  return {
+    id: `${providerTag(base.baseUrl)}/${token}`,
+    model: { ...base, model: token },
+  };
+}
+
+/**
  * Resolve the ordered failover chain: the configured model is always the
  * primary candidate, followed by each SC_FAILOVER entry in declared order.
  *
@@ -282,28 +324,18 @@ function buildCandidateModel(
  * (model ids may themselves contain "/", e.g. "meta/llama-3.3-70b").
  * Duplicate baseUrl+model pairs collapse — SC_FAILOVER may repeat the
  * primary without causing a second identical candidate.
+ *
+ * `primary` (#424) overrides the chain head — used by role routing to pin a
+ * phase to its resolved role model while keeping SC_FAILOVER as the cascade.
  */
-export function resolveFailoverChain(config: ProjectConfig): FailoverCandidate[] {
-  const chain: FailoverCandidate[] = [primaryCandidate(config.model)];
+export function resolveFailoverChain(config: ProjectConfig, primary?: FailoverCandidate): FailoverCandidate[] {
+  const base = primary?.model ?? config.model;
+  const chain: FailoverCandidate[] = [primary ?? primaryCandidate(config.model)];
   const raw = process.env[FAILOVER_ENV]?.trim();
   if (raw) {
     for (const token of raw.split(',').map(t => t.trim()).filter(Boolean)) {
-      const slash = token.indexOf('/');
-      const providerName = slash > 0 ? token.slice(0, slash).trim() : '';
-      const profile = providerName ? config.profiles?.[providerName] : undefined;
-      if (profile || KNOWN_PROVIDER_BASE_URLS[providerName]) {
-        const modelId = token.slice(slash + 1).trim();
-        if (!modelId) continue;
-        chain.push({
-          id: `${providerName}/${modelId}`,
-          model: buildCandidateModel(config.model, providerName, profile, modelId),
-        });
-      } else {
-        chain.push({
-          id: `${providerTag(config.model.baseUrl)}/${token}`,
-          model: { ...config.model, model: token },
-        });
-      }
+      const candidate = resolveModelToken(config, token, base);
+      if (candidate) chain.push(candidate);
     }
   }
   const seen = new Set<string>();

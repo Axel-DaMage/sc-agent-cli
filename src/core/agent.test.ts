@@ -1,6 +1,8 @@
 import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { pruneMessageHistory, limitMessageHistory, Agent } from './agent.js';
+import { resolveRole, phasePolicy } from './roles.js';
+import { writeFileTool } from '../tools/write-file.js';
 import { estimateTokens } from '../utils/token-tracker.js';
 import type { Message } from './types.js';
 
@@ -432,6 +434,152 @@ test('Agent.run does not count memory_write as a workspace mutation for the guar
 
   mock.mockRestore();
   memSpy.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// Multi-model orchestration (#424) — phase lifecycle
+// ---------------------------------------------------------------------------
+
+function makeAgent(): Agent {
+  return new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      },
+      roles: { executor: 'openai/gpt-4o-mini' },
+    },
+  });
+}
+
+test('Agent.run records a phase segment and scopes tokens to the role (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'executor');
+  assert.equal(res.fallback, false);
+  assert.equal(res.candidate.id, 'openai/gpt-4o-mini');
+
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({
+    content: 'Applied the change.',
+    usage: { prompt_tokens: 500, completion_tokens: 40, total_tokens: 540 },
+  }));
+
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('executor') });
+
+  const phases = agent.getPhases();
+  assert.deepEqual(phases, [{ role: 'executor', provider: 'openai', model: 'gpt-4o-mini', iterations: 1 }]);
+  assert.deepEqual(agent.getRoleFallbacks(), []);
+
+  const roleUsage = agent.tokenTracker.getRoleUsage();
+  // Provider-reported usage supersedes the chars/4 estimate (#424).
+  assert.equal(roleUsage.executor.in, 500);
+  assert.equal(roleUsage.executor.out, 40);
+  assert.deepEqual(agent.tokenTracker.getUsage(), { inputTokens: 500, outputTokens: 40, totalTokens: 540 });
+});
+
+test('Agent.run fallback roles keep the default model and record role_fallback (#424)', async () => {
+  const agent = makeAgent();
+  // No planner mapping in makeAgent's config.roles → fallback to default.
+  const res = resolveRole(agent.options.config, 'planner');
+  assert.equal(res.fallback, true);
+
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: '1. inspect\n2. edit\n3. verify' }));
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.deepEqual(agent.getRoleFallbacks(), ['planner']);
+  const phases = agent.getPhases();
+  assert.equal(phases.length, 1);
+  assert.equal(phases[0].role, 'planner');
+  assert.equal(phases[0].model, 'test-model'); // default model served
+  assert.equal(phases[0].provider, 'custom');
+});
+
+test('Agent.run read-only phases hide mutating tools from the schema (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'planner');
+
+  let seenToolNames: string[] = [];
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async (options) => {
+    seenToolNames = (options.tools ?? []).map(t => t.function.name);
+    return { content: 'plan' };
+  });
+
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.ok(!seenToolNames.includes('write_file'));
+  assert.ok(!seenToolNames.includes('edit_file'));
+  assert.ok(!seenToolNames.includes('memory_write'));
+  assert.ok(seenToolNames.includes('read_file'));
+  // Dual-purpose tools stay — the dispatch gate covers them.
+  assert.ok(seenToolNames.includes('run_shell'));
+  assert.ok(seenToolNames.includes('git'));
+});
+
+test('Agent.run read-only phase denies a mutating call at dispatch (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'planner');
+  const writeSpy = vi.spyOn(writeFileTool, 'execute').mockResolvedValue('written');
+
+  let callCount = 0;
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      // The model hallucinated a write_file call despite it being absent
+      // from the schema — the dispatch gate must reject it.
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'w1',
+          type: 'function' as const,
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'x.txt', content: 'y' }) },
+        }],
+      };
+    }
+    return { content: 'Plan: do not write — step sequence follows.' };
+  });
+
+  const result = await agent.run('task', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.equal(writeSpy.mock.calls.length, 0);
+  const denial = result.find(m => m.role === 'tool' && m.content.startsWith('Error: Tool call denied:'));
+  assert.ok(denial, 'expected a read-only phase denial tool result');
+  assert.ok(denial!.content.includes('write_file'));
+
+  writeSpy.mockRestore();
+});
+
+test('Agent.run suppresses self-heal/livelock guards in prose phases (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'planner');
+
+  let callCount = 0;
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    // Future-intention prose would normally trigger the self-heal re-prompt
+    // in autoApprove mode; planner phases must end on it instead.
+    return { content: 'I will inspect the repository layout first, then produce the step-by-step plan for the executor phase to implement the feature safely.' };
+  });
+
+  await agent.run('Fix the build errors', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.equal(callCount, 1);
+});
+
+test('Agent.run restores the default failover chain after a phase (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'executor');
+
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: 'done' }));
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('executor') });
+
+  // Back on the default chain: single candidate = configured model.
+  assert.equal(agent.getPhases().length, 1);
+  const res2 = resolveRole(agent.options.config, 'planner');
+  await agent.run('plan task', [], undefined, { routing: res2, ...phasePolicy('planner') });
+  assert.equal(agent.getPhases().length, 2);
 });
 
 // --- Context-spend accounting + injection budget guard (#422) ---

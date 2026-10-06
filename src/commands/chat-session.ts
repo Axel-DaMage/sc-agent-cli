@@ -15,7 +15,6 @@ import type { Message } from '../core/types.js';
 import { loadConfig, getGlobalConfigPath } from '../core/config.js';
 import { clearSessionPermissions } from '../utils/permissions.js';
 import { checkStorageLimit, enforceStorageLimit, formatBytes } from '../utils/storage-limit.js';
-import { estimateCost } from '../utils/token-tracker.js';
 import { getModelProfileEmptyStateGuidance } from './chat-session-guidance.js';
 import { getStorageGuidance } from '../utils/storage-guidance.js';
 import { statusBar, getShortcutsBar } from '../utils/status-bar.js';
@@ -28,6 +27,7 @@ import { verbose, verboseSession, verboseError } from '../utils/verbose-logger.j
 import { getWorkspaceGitState, detectSessionMutations, countMutatingToolCalls } from '../utils/mutation-detector.js';
 import { buildRunManifest, emitRunManifest, type RunExitReason } from '../utils/run-manifest.js';
 import { detectSessionResolution } from '../utils/resolution-detector.js';
+import { resolveRolePipeline, phasePolicy, buildPhasePrompt } from '../core/roles.js';
 
 // Multi-line input handler: Enter=submit, Shift+Enter=newline, paste inserts verbatim
 function readUserInput(history: string[], workspaceRoot: string): Promise<string> {
@@ -678,13 +678,24 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       history,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
-      costUsd: estimateCost(currentConfig.model.model, usage.inputTokens, usage.outputTokens),
+      // #424: the tracker prices each role at its serving model when the
+      // run used role routing; identical to estimateCost(model, ...) for
+      // single-phase runs.
+      costUsd: agent.tokenTracker.getEstimatedCost(),
       toolCalls: agent.getToolCallCounts(),
       toolRunCount: stats.toolRunCount,
-      iterations: stats.iterations,
+      // totalIterations covers the whole phase pipeline (#424); `iterations`
+      // alone would report only the last phase's count.
+      iterations: stats.totalIterations,
       durationMs: Date.now() - batchStart,
       checkpointPath: existsSync(checkpointPath) ? checkpointPath : null,
       devcontainer: options.devcontainer,
+      provider: agent.providerUsed,
+      errorObj: agentError,
+      phases: agent.getPhases(),
+      roleFallbacks: agent.getRoleFallbacks(),
+      roleTokens: agent.tokenTracker.getRoleUsage(),
+      cachedTokens: agent.tokenTracker.getCachedTokens(),
       resolutionInfo: detectResolutionSafely(exitReason),
       contextBudget: agent.getContextBudget(),
     });
@@ -757,8 +768,35 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     // Snapshot git state before the agent runs — mutations made via run_shell
     // or unclassified tools are caught by comparing status/HEAD afterwards.
     batchGitStateBefore = getWorkspaceGitState(options.workspaceRoot);
+    // #424 multi-model orchestration: when `config.roles` is present (or
+    // --role/SC_ROLE pins a single phase) the headless run expands into the
+    // planner → executor → reviewer pipeline. Each phase runs on its
+    // configured provider/model; absent/invalid mappings fall back to the
+    // run's default model and surface as `role_fallback` in the manifest.
+    // Without role config the classic single-phase run is preserved.
+    const rolePipeline = (options.role || currentConfig.roles)
+      ? resolveRolePipeline(currentConfig, options.role)
+      : null;
+
     try {
-      history = await agent.run(userInput, history);
+      if (rolePipeline) {
+        for (const res of rolePipeline) {
+          const policy = phasePolicy(res.role);
+          verbose(`[roles] phase ${res.role} → ${res.candidate.id}${res.fallback ? ' (default-model fallback)' : ''}`);
+          if (!isQuiet && options.outputFormat !== 'json') {
+            console.log(chalk.gray(`  │ 🎭 Phase ${res.role} → ${res.candidate.id}${res.fallback ? ' (fallback)' : ''}`));
+          }
+          history = await agent.run(buildPhasePrompt(res.role, userInput), history, undefined, {
+            routing: res,
+            readOnly: policy.readOnly,
+            suppressCompletionGuards: policy.suppressCompletionGuards,
+          });
+          // A budget hit ends the whole run — later phases must not start.
+          if (agent.getStats().budgetExceeded) break;
+        }
+      } else {
+        history = await agent.run(userInput, history);
+      }
     } catch (err: any) {
       agentError = err;
       const errorMsg = err instanceof Error ? err.message : String(err);

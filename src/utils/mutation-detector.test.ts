@@ -188,6 +188,49 @@ test('countMutatingToolCalls counts mutating tool calls across history', () => {
   assert.equal(countMutatingToolCalls(history), 2); // 'echo "a" > out.txt' and git commit
 });
 
+test('countMutatingToolCalls excludes calls denied by the read-only phase gate (#424)', () => {
+  const history: Message[] = [
+    { role: 'user', content: 'plan the fix' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'd1',
+          type: 'function',
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'x.ts', content: 'y' }) },
+        },
+        {
+          id: 'r1',
+          type: 'function',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'x.ts' }) },
+        },
+      ],
+    },
+    {
+      role: 'tool',
+      tool_call_id: 'd1',
+      content: 'Error: Tool call denied: write_file is mutating and this phase is read-only (planner/reviewer phases may inspect but never modify the workspace).',
+    },
+    { role: 'tool', tool_call_id: 'r1', content: 'file contents' },
+    // A mutating call that ran in a later (executor) phase still counts.
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'e1',
+          type: 'function',
+          function: { name: 'edit_file', arguments: JSON.stringify({ path: 'x.ts', patch: 'p' }) },
+        },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'e1', content: 'applied' },
+  ];
+
+  assert.equal(countMutatingToolCalls(history), 1);
+});
+
 test('hasWorktreeChanges detects status and head differences', () => {
   assert.equal(hasWorktreeChanges(null, null), false);
   assert.equal(hasWorktreeChanges({ status: '', head: 'abc' }, null), false);

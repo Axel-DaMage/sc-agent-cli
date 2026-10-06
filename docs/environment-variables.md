@@ -83,6 +83,21 @@ Behavior:
 
 ---
 
+### SC_ROLE
+
+Pin a headless run to a single orchestration phase (`--role` flag equivalent). Valid values: `planner`, `executor`, `reviewer`. With no `SC_ROLE`/`--role`, a configured `roles` map expands the run into the full planner → executor → reviewer pipeline.
+
+**Default:** unset (full pipeline when `config.roles` is present, classic single-phase run otherwise)
+
+```bash
+# Run only the executor phase, on its configured role model
+SC_ROLE=executor scc chat -yq "implement issue #424"
+```
+
+See [non-interactive-mode.md](non-interactive-mode.md#multi-model-orchestration-roles-424) for the `roles` config, phase policies, and manifest fields.
+
+---
+
 ### SC_PROVIDER_CONNECT_TIMEOUT_MS
 
 Maximum time (ms) to wait for response headers on each provider attempt.

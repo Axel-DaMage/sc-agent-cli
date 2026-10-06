@@ -220,13 +220,29 @@ export function isWorkspaceMutatingToolCall(toolName: string, args?: unknown): b
 }
 
 /**
- * Count mutating tool calls in a message history.
+ * Tool-result prefix marking a mutating call denied by a read-only
+ * orchestration phase (#424). A denied attempt produces no mutation.
+ */
+export const READ_ONLY_PHASE_DENIAL_PREFIX = 'Error: Tool call denied:';
+
+/**
+ * Count mutating tool calls in a message history. Calls rejected by the
+ * read-only phase gate are excluded — a denied attempt is not a mutation.
  */
 export function countMutatingToolCalls(history: Message[]): number {
+  const deniedCallIds = new Set<string>();
+  for (const m of history) {
+    if (m.role === 'tool' && m.tool_call_id &&
+        typeof m.content === 'string' &&
+        m.content.startsWith(READ_ONLY_PHASE_DENIAL_PREFIX)) {
+      deniedCallIds.add(m.tool_call_id);
+    }
+  }
   let count = 0;
   for (const m of history) {
     if (m.role !== 'assistant' || !m.tool_calls) continue;
     for (const tc of m.tool_calls) {
+      if (deniedCallIds.has(tc.id)) continue;
       if (isMutatingToolCall(tc.function.name, tc.function.arguments)) {
         count++;
       }

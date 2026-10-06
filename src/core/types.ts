@@ -45,6 +45,13 @@ export interface ModelConfig {
 
 export type PermissionProfile = 'traditional' | 'blacklist';
 
+/**
+ * Multi-model orchestration roles (#424). Each role maps to a
+ * "provider/model" token resolved with the SC_FAILOVER alias semantics
+ * (profile name → known provider → model id on the configured endpoint).
+ */
+export type AgentRole = 'planner' | 'executor' | 'reviewer';
+
 export interface ThrottleConfig {
   enabled: boolean;
   minDelayMs: number;          // Minimum delay between API calls
@@ -65,6 +72,13 @@ export interface ProjectConfig {
   };
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
+  /**
+   * Per-phase model routing for headless runs (#424): planner, executor and
+   * reviewer/judge each map to a "provider/model" alias. All roles optional —
+   * absent or invalid entries fall back to `model.*` (logged as
+   * `role_fallback` in the run manifest).
+   */
+  roles?: Partial<Record<AgentRole, string>>;
   mcp?: {
     servers?: Record<string, {
       command: string;

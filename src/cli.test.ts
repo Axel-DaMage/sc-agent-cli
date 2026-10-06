@@ -79,6 +79,16 @@ test('CLI --output-format rejects unknown formats', () => {
   assert.match(result.stderr, /--output-format must be "text" or "json"/);
 });
 
+test('CLI --role rejects unknown role names (#424)', () => {
+  const result = spawnSync(process.execPath, [cliEntrypoint, '--role', 'wizard', 'hi'], {
+    cwd: projectRoot,
+    encoding: 'utf-8',
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--role\/SC_ROLE must be one of: planner, executor, reviewer/);
+});
+
 test('CLI --output-format json requires a prompt', () => {
   const result = spawnSync(process.execPath, [cliEntrypoint, '--output-format', 'json'], {
     cwd: projectRoot,

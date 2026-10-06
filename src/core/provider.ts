@@ -29,9 +29,20 @@ export interface ChatCompletionOptions {
   tool_choice?: 'none' | 'auto' | 'required' | { type: 'function'; function: { name: string } };
 }
 
+/** Provider-reported token usage (#424) — present when the API returns it. */
+export interface ProviderUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
 export interface ChatCompletionResponse {
   content: string;
   tool_calls?: ToolCall[];
+  /** Real token counts when the provider reports them (non-streamed always;
+   *  streamed when the provider honors stream_options.include_usage). */
+  usage?: ProviderUsage;
 }
 
 export class OpenAICompatibleProvider {
@@ -205,6 +216,13 @@ export class OpenAICompatibleProvider {
       body.max_tokens = model.maxTokens;
     }
 
+    // Ask for a real usage chunk on the final streamed frame so per-role
+    // token accounting (#424) can prefer reported counts over estimates.
+    // Providers that don't support stream_options ignore unknown fields.
+    if (body.stream === true) {
+      body.stream_options = { include_usage: true };
+    }
+
     if (options.tool_choice) {
       body.tool_choice = options.tool_choice;
     }
@@ -306,6 +324,7 @@ export class OpenAICompatibleProvider {
     return {
       content: choice.message?.content || '',
       tool_calls: choice.message?.tool_calls,
+      usage: data.usage ?? undefined,
     };
   }
 
@@ -319,10 +338,16 @@ export class OpenAICompatibleProvider {
     let partialData = ''; // Buffers JSON from data: lines split across TCP chunks
     let fullContent = '';
     const accumulatedToolCalls: Map<number, ToolCall> = new Map();
+    let reportedUsage: ProviderUsage | undefined;
 
     function processChunk(data: string): boolean {
       try {
         const chunk = JSON.parse(data);
+        // The usage frame arrives with empty choices on the last chunk when
+        // the provider honors stream_options.include_usage (#424).
+        if (chunk.usage && typeof chunk.usage === 'object') {
+          reportedUsage = chunk.usage as ProviderUsage;
+        }
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) return true;
 
@@ -391,6 +416,7 @@ export class OpenAICompatibleProvider {
     return {
       content: fullContent,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: reportedUsage,
     };
   }
 }

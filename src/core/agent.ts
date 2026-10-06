@@ -3,6 +3,8 @@ import type { Message, ProjectConfig, StreamDelta, AgentCallbacks } from './type
 import { OpenAICompatibleProvider } from './provider.js';
 import { resolveFailoverChain } from './failover.js';
 import type { CandidateAttempt } from './failover.js';
+import { PhaseTracker, READ_ONLY_PHASE_DENIED_TOOLS } from './roles.js';
+import type { AgentRole, PhaseRecord, RoleResolution } from './roles.js';
 import { loadProjectContext } from './project-context.js';
 import { probeRepo, formatRepoProfileForPrompt } from './repo-probe/index.js';
 import { ALL_TOOLS, getToolByName } from '../tools/registry.js';
@@ -29,6 +31,7 @@ import { resolveThrottleConfig } from '../utils/throttle.js';
 import {
   getWorkspaceGitState,
   hasWorktreeChanges,
+  isMutatingToolCall,
   isWorkspaceMutatingToolCall,
   expectsWorkspaceMutation,
   declaresNoChangesNeeded,
@@ -727,6 +730,26 @@ export interface AgentOptions {
   maxSteps?: number;
   maxSeconds?: number;
   maxTotalTokens?: number;
+  /**
+   * #424 multi-model orchestration — pin this run to a single phase role
+   * (`--role`/`SC_ROLE`). When unset, a configured `roles` map expands the
+   * headless run into the full planner → executor → reviewer pipeline.
+   */
+  role?: AgentRole;
+}
+
+/**
+ * Per-phase routing options for `agent.run()` (#424). `routing` pins the
+ * provider/model for the duration of the call and scopes token accounting;
+ * `readOnly` denies mutating tool calls; `suppressCompletionGuards` skips
+ * self-heal/zero-mutation/livelock handling for phases whose correct output
+ * is prose (planner plans, reviewer verdicts).
+ */
+export interface AgentRunPhaseOptions {
+  /** Resolved role → candidate routing; presence marks this run as a phase. */
+  routing?: RoleResolution;
+  readOnly?: boolean;
+  suppressCompletionGuards?: boolean;
 }
 
 export class Agent {
@@ -739,6 +762,10 @@ export class Agent {
   private callbacks?: AgentCallbacks;
   public tokenTracker: TokenTracker;
   private _iterations: number = 0;
+  private _totalIterations: number = 0;
+  private phaseTracker = new PhaseTracker();
+  private _roleFallbacks: AgentRole[] = [];
+  private _phaseModel: string | null = null;
   private _toolRunCount: number = 0;
   private _toolCallCounts = new Map<string, number>();
   private _lastCheckpointIteration: number = 0;
@@ -775,8 +802,57 @@ export class Agent {
     }
   }
 
-  getStats(): { iterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
-    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
+  getStats(): { iterations: number; totalIterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
+    return { iterations: this._iterations, totalIterations: this._totalIterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
+  }
+
+  /**
+   * Enter an orchestration phase (#424): the provider's failover chain is
+   * re-rooted at the role's resolved candidate (SC_FAILOVER still cascades
+   * behind it), token accounting is scoped to the role, and a phase segment
+   * opens in the manifest log. Fallbacks record `role_fallback`.
+   */
+  beginPhase(res: RoleResolution): void {
+    if (res.fallback && !this._roleFallbacks.includes(res.role)) {
+      this._roleFallbacks.push(res.role);
+    }
+    this._phaseModel = res.candidate.model.model;
+    this.phaseTracker.begin(res.role, res.candidate);
+    this.tokenTracker.setRole(res.role, res.candidate.model.model);
+    this.provider.setFailoverChain(resolveFailoverChain(this.options.config, res.candidate));
+    this.provider.setThrottleConfig(resolveThrottleConfig(
+      this.options.config.settings?.throttling,
+      res.candidate.model.model,
+      res.candidate.model.baseUrl
+    ));
+  }
+
+  /** Close the active phase — restores the run's default failover chain. */
+  endPhase(): void {
+    this.phaseTracker.end();
+    this.tokenTracker.setRole(null);
+    this._phaseModel = null;
+    this.provider.setFailoverChain(resolveFailoverChain(this.options.config));
+    this.provider.setThrottleConfig(resolveThrottleConfig(
+      this.options.config.settings?.throttling,
+      this.options.config.model.model,
+      this.options.config.model.baseUrl
+    ));
+  }
+
+  /** Append-only phase segments for the run manifest (#424). */
+  getPhases(): PhaseRecord[] {
+    return this.phaseTracker.getPhases();
+  }
+
+  /** Roles that fell back to the run's default model (manifest `role_fallback`). */
+  getRoleFallbacks(): AgentRole[] {
+    return [...this._roleFallbacks];
+  }
+
+  /** "provider/model" label of the failover candidate that served the last call. */
+  get providerUsed(): string | null {
+    return this.provider.providerUsed;
   }
 
   /** Per-tool invocation counts for the current session (#415 usage summary). */
@@ -920,8 +996,23 @@ export class Agent {
     });
   }
 
-  async run(userMessage: string, history: Message[] = [], signal?: AbortSignal): Promise<Message[]> {
+  async run(userMessage: string, history: Message[] = [], signal?: AbortSignal, phase?: AgentRunPhaseOptions): Promise<Message[]> {
+    // #424: a phase-scoped run re-roots the provider at the role's candidate
+    // and opens a manifest segment; the finally guarantees the run's default
+    // chain is restored even when the phase throws.
+    const roleRes = phase?.routing ?? null;
+    if (roleRes) this.beginPhase(roleRes);
+    try {
+      return await this.runLoop(userMessage, history, signal, phase);
+    } finally {
+      if (roleRes) this.endPhase();
+    }
+  }
+
+  private async runLoop(userMessage: string, history: Message[] = [], signal?: AbortSignal, phase?: AgentRunPhaseOptions): Promise<Message[]> {
     let messages: Message[] = [...history];
+    const readOnlyPhase = phase?.readOnly ?? false;
+    const suppressGuards = phase?.suppressCompletionGuards ?? false;
 
     verbose(`Prompt received: ${userMessage.length} chars, ~${estimateMessageTokens({ role: 'user', content: userMessage })} tokens (estimated)`);
     verbose(`Auto-approve: ${!!this.options.autoApprove}, Quiet: ${!!this.options.quiet}`);
@@ -1079,6 +1170,7 @@ export class Agent {
 
       iterations++;
       this._iterations = iterations;
+      this._totalIterations++;
 
       // CRITICAL: Validate, compress, prune, and auto-correct message sequence before sending to LLM.
       // Compression+pruning keeps the context window and request size within limits for long runs.
@@ -1109,7 +1201,7 @@ export class Agent {
         reqEstTokens += est;
         this.tokenTracker.addInput(est);
       }
-      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
+      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this._phaseModel ?? this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
       const llmStartTime = Date.now();
 
       // Show thinking indicator on first iteration
@@ -1123,7 +1215,12 @@ export class Agent {
         response = await this.provider.chatCompletion(
           {
             messages,
-            tools: ALL_TOOLS.map((t) => t.definition),
+            // #424 read-only phases (planner/reviewer) never see mutating
+            // tools in the schema — defense in depth alongside the dispatch
+            // gate in executeTool.
+            tools: ALL_TOOLS
+              .filter((t) => !readOnlyPhase || !READ_ONLY_PHASE_DENIED_TOOLS.has(t.definition.function.name))
+              .map((t) => t.definition),
             // Respect the configured transport mode. Some OpenAI-compatible
             // providers return empty streamed tool deltas while non-streaming
             // responses contain valid tool calls.
@@ -1135,7 +1232,7 @@ export class Agent {
         this.provider.setLastCallWasError(false);
       } catch (err) {
         this.provider.setLastCallWasError(true);
-        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
+        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this._phaseModel ?? this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
         throw err;
       }
 
@@ -1153,8 +1250,27 @@ export class Agent {
           this.tokenTracker.addOutput(est);
         }
       }
+      // #424: provider-reported usage supersedes the chars/4 estimates above —
+      // fold the difference into the tracker so totals and per-role buckets
+      // reflect real counts whenever the API reports them.
+      if (response.usage) {
+        const promptTok = response.usage.prompt_tokens;
+        const completionTok = response.usage.completion_tokens;
+        if (typeof promptTok === 'number' && promptTok !== reqEstTokens) {
+          this.tokenTracker.addInput(promptTok - reqEstTokens);
+        }
+        if (typeof completionTok === 'number' && completionTok !== resEstTokens) {
+          this.tokenTracker.addOutput(completionTok - resEstTokens);
+          resEstTokens = completionTok;
+        }
+        const cached = response.usage.prompt_tokens_details?.cached_tokens;
+        if (typeof cached === 'number' && cached > 0) {
+          this.tokenTracker.addCached(cached);
+        }
+      }
+      this.phaseTracker.noteServed(this.provider.providerUsed);
       this.audit?.emit({
-        type: 'llm_response', iteration: iterations, model: this.options.config.model.model,
+        type: 'llm_response', iteration: iterations, model: this._phaseModel ?? this.options.config.model.model,
         duration_ms: Date.now() - llmStartTime, status: 'ok',
         content_bytes: response.content?.length ?? 0, tool_calls: response.tool_calls?.length ?? 0,
         est_tokens: resEstTokens,
@@ -1325,6 +1441,23 @@ export class Agent {
             };
           }
 
+          // #424 read-only phase gate: the schema already hides the obvious
+          // mutating tools, but git/run_shell are dual-purpose — reject
+          // invocations classified as mutating at dispatch time.
+          if (readOnlyPhase && isMutatingToolCall(toolName, args)) {
+            const denied = `Tool call denied: ${toolName} is mutating and this phase is read-only (planner/reviewer phases may inspect but never modify the workspace).`;
+            this.emitToolError(toolName, denied);
+            this.log(chalk.gray(`  │ ${chalk.red('✗')} ${denied}`));
+            this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, phase: 'read_only_phase', error: denied.slice(0, 200) });
+            toolsUsed.push({name: toolName, success: false, error: denied, args});
+            return {
+              role: 'tool' as const,
+              content: `Error: ${denied}`,
+              tool_call_id: toolCall.id,
+              name: toolName,
+            };
+          }
+
           const toolStartTime = Date.now();
           try {
             verboseToolCall(toolName, args);
@@ -1443,7 +1576,9 @@ export class Agent {
         // text response is fine (legit final answer ends the loop at 1) —
         // only a streak reaching the threshold is a livelock.
         consecutiveNoToolResponses++;
-        if (livelockLimit > 0 && consecutiveNoToolResponses >= livelockLimit) {
+        // #424: planner/reviewer phases legitimately emit consecutive prose
+        // responses — the livelock guard does not apply to them.
+        if (!suppressGuards && livelockLimit > 0 && consecutiveNoToolResponses >= livelockLimit) {
           const lastOutput = content.trim().slice(0, 300);
           throw new Error(
             `[SC_LIVELOCK] Model produced ${consecutiveNoToolResponses} consecutive responses ` +
@@ -1465,6 +1600,7 @@ export class Agent {
         const hasFailurePhrase = /\b(does not compile|compilation error|syntax error|cannot find|unable to|not compile|build fail)/i.test(content);
 
         const shouldSelfHeal = (
+          !suppressGuards &&
           !isConversational &&
           !isShortResponse &&
           (isDeferring || isFutureIntention || hasFailurePhrase || (hasErrorIndicators && hasToolRun))
@@ -1521,6 +1657,7 @@ export class Agent {
           0
         );
         if (
+          !suppressGuards &&
           unattendedRun &&
           zeroMutationReprompts < zeroMutationRepromptBudget &&
           mutatingCalls === 0 &&

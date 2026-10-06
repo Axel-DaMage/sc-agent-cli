@@ -1,10 +1,23 @@
-import { afterEach, beforeEach, test } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { getGlobalConfigPath, loadConfig, validateConfig } from './config.js';
 import type { ProjectConfig } from './types.js';
+
+// Keep loadConfig() hermetic: on a dev machine the real
+// ~/.sc-agent/config.json can carry an activeProfile/model that would
+// silently override the fixtures below. Redirect homedir() to an empty temp
+// dir so the global-config merge finds nothing (#424 quality gate).
+vi.mock('node:os', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('node:os')>();
+  const { mkdtempSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const fakeHome = mkdtempSync(join(mod.tmpdir(), 'sc-agent-home-'));
+  const mocked = { ...mod, homedir: () => fakeHome };
+  return { ...mocked, default: mocked };
+});
 
 function createConfig(baseUrl: string, apiKey?: string): ProjectConfig {
   return {

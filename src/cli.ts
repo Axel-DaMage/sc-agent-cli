@@ -16,6 +16,8 @@ import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
 import { classifyError } from './utils/exit-codes.js';
+import { isAgentRole, AGENT_ROLES } from './core/roles.js';
+import type { AgentRole } from './core/roles.js';
 import type { DevcontainerRunInfo } from './core/devcontainer.js';
 
 const require = createRequire(import.meta.url);
@@ -54,6 +56,7 @@ program
   .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
   .option('--no-commit', 'Hard-block git mutations inside the session (for orchestrators that own git state)')
   .option('--devcontainer', 'Run the agent loop inside the repo .devcontainer via the Dev Container CLI (falls back to host when unavailable)')
+  .option('--role <role>', `Pin the headless run to a single orchestration phase: ${AGENT_ROLES.join('|')} (env: SC_ROLE)`)
   .option('--prompt-file <path>', 'Read the prompt from a file (use "-" to read from stdin). Mutually exclusive with the prompt argument.')
   .action(async (prompt: string | undefined, options) => {
     try {
@@ -128,6 +131,19 @@ program
       if (outputFormat === 'json' && (!prompt || !prompt.trim())) {
         console.error(chalk.red('Error: --output-format json requires a prompt (or --prompt-file); it is only valid for non-interactive runs'));
         process.exit(1);
+      }
+
+      // #424: --role/SC_ROLE pins the headless run to one orchestration
+      // phase. An unknown role name is a usage error (distinct from an
+      // invalid role→model *mapping*, which falls back to the default).
+      const roleRaw = (options.role ?? process.env.SC_ROLE) || undefined;
+      let role: AgentRole | undefined;
+      if (roleRaw !== undefined) {
+        if (!isAgentRole(roleRaw)) {
+          console.error(chalk.red(`Error: --role/SC_ROLE must be one of: ${AGENT_ROLES.join(', ')} (got "${roleRaw}")`));
+          process.exit(1);
+        }
+        role = roleRaw;
       }
 
       // Count -v flags from raw argv
@@ -302,6 +318,7 @@ program
         maxSteps: budgetOpt(options.maxSteps, process.env.SC_MAX_STEPS, '--max-steps'),
         maxSeconds: budgetOpt(options.maxSeconds, process.env.SC_MAX_SECONDS, '--max-seconds'),
         maxTotalTokens: budgetOpt(options.maxTotalTokens, process.env.SC_MAX_TOTAL_TOKENS, '--max-total-tokens'),
+        role,
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);

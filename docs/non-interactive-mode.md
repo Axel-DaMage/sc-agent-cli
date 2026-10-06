@@ -131,6 +131,7 @@ sc -yq "run npm test and report results"
 | `--output-format json` | Emit *only* the JSON run manifest on stdout | Machine consumers (CI workers, dashboards) |
 | `--summary-file <path>` / `--output-file <path>` | Also write the manifest to a file | Artifact collection, cost accounting |
 | `--devcontainer` | Run the agent inside the repo `.devcontainer` image | CI/prod parity, toolchain drift prevention |
+| `--role <planner\|executor\|reviewer>` | Pin the headless run to a single orchestration phase (env: `SC_ROLE`) | Running one pipeline step under a role-specific model |
 
 ---
 
@@ -225,6 +226,62 @@ Failover contract fields (#425):
    "retryable":true,"status":429,"error":"API Error 429: rate limited","durationMs":280}],
  "exit_reason":"error", ...}
 ```
+
+---
+
+## Multi-Model Orchestration (`roles`, #424)
+
+Different phases of a run have different intelligence needs — planning wants the strongest model, mechanical edits can run on a cheap/fast model, and review benefits from a different provider entirely (adversarial diversity). `config.roles` maps each phase role to a `provider/model` alias using the same resolution rules as `SC_FAILOVER` (profile name → known provider → model id on the configured endpoint):
+
+```json
+{
+  "roles": {
+    "planner":  "anthropic/claude-sonnet-4-6",
+    "executor": "openai/gpt-4o-mini",
+    "reviewer": "nvidia/llama-3.3-70b-instruct"
+  }
+}
+```
+
+**All roles are optional.** When `roles` is present, a headless run expands into a `planner → executor → reviewer` pipeline: the planner inspects the workspace read-only and emits a plan, the executor applies the changes with the full tool set, and the reviewer audits the work read-only and emits a verdict. Absent or invalid role mappings are never fatal — the phase falls back to the run's default model and is listed in `role_fallback`. Without `roles`, the classic single-phase run is preserved unchanged.
+
+Phase policies:
+
+- **planner / reviewer** — read-only: `write_file`/`edit_file`/`memory_write` are dropped from the tool schema and other mutating calls (e.g. a mutating `git` op or `run_shell` command) are rejected at dispatch. Completion guards (self-heal, zero-mutation, livelock) are suppressed — prose plans and verdicts are the correct output.
+- **executor** — full tool set and the normal completion guards.
+
+Pin a single phase instead of the whole pipeline with `--role` (or `SC_ROLE`):
+
+```bash
+sc chat -yq --role executor "implement issue #42"          # executor phase only
+SC_ROLE=reviewer sc chat -yq --output-format json "…"       # reviewer phase only
+```
+
+Each phase re-roots the provider chain at its role's candidate — `SC_FAILOVER` still cascades behind it, and a role candidate never forwards the primary model's API key to a different host (same credential isolation as the cascade).
+
+### Manifest fields
+
+```json
+{"v":1,"success":true,"model":"llama3.2","provider":"openai/gpt-4o-mini",
+ "phases":[
+   {"role":"planner","provider":"anthropic","model":"claude-sonnet-4-6","iterations":3},
+   {"role":"executor","provider":"openai","model":"gpt-4o-mini","iterations":11},
+   {"role":"executor","provider":"ollama","model":"llama3.2","iterations":2},
+   {"role":"reviewer","provider":"ollama","model":"llama3.2","iterations":1}],
+ "role_fallback":["reviewer"],
+ "tokens":{"byRole":{"planner":{"in":8300,"out":1200},
+                     "executor":{"in":41000,"out":5300,"cached":9000},
+                     "reviewer":{"in":26000,"out":800}},
+           "total":{"in":75300,"out":7300,"cached":9000}},
+ "iterations":17,"exit_reason":"success", ...}
+```
+
+- `phases` — append-only segment log: each entry records `role`, serving `provider`/`model`, and completed LLM `iterations`. Phase retries and mid-phase `SC_FAILOVER` cascades **append** entries (above, the executor cascaded to Ollama mid-phase) rather than overwriting.
+- `role_fallback` — roles whose configured mapping was absent or invalid and ran on the default model.
+- `tokens.byRole` — input/output (and `cached`, when the provider reports it) attributed per role; `tokens.total` mirrors `tokens_in`/`tokens_out`. `estimated_cost_usd` prices each role at its serving model.
+- `iterations` — total LLM iterations across all phases.
+
+Usage capture: when `stream` is enabled the provider is asked for `stream_options.include_usage`, and a reported `usage` object (streamed or not) supersedes the chars/4 heuristic in the tracker. Providers that don't report usage keep the estimate.
 
 ---
 

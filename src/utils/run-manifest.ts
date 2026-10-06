@@ -4,6 +4,8 @@ import type { Message } from '../core/types.js';
 import { ProviderFailoverError, type CandidateAttempt } from '../core/failover.js';
 import { EXIT_CODES, classifyError } from './exit-codes.js';
 import type { DevcontainerRunInfo } from '../core/devcontainer.js';
+import type { AgentRole, PhaseRecord } from '../core/roles.js';
+import type { RoleTokenUsage } from './token-tracker.js';
 import type { ResolutionResult } from './resolution-detector.js';
 import type { ContextBudgetReport } from './context-budget.js';
 import { verboseError } from './verbose-logger.js';
@@ -51,6 +53,23 @@ export interface RunManifest {
   tool_calls_total: number;
   tokens_in: number;
   tokens_out: number;
+  /**
+   * #424 token breakdown — per-role usage plus run totals. `cached` is
+   * included per role/total only when the provider reports cached prompt
+   * tokens. Emitted whenever phases ran (or the tracker has role buckets).
+   */
+  tokens?: {
+    byRole: Partial<Record<AgentRole, RoleTokenUsage>>;
+    total: { in: number; out: number; cached?: number };
+  };
+  /**
+   * #424 append-only phase segment log — each entry records the role,
+   * serving provider/model, and completed LLM iterations. Retries and
+   * mid-phase failover cascades append entries rather than overwriting.
+   */
+  phases?: PhaseRecord[];
+  /** #424 roles that fell back to the run's default model (absent/invalid mapping). */
+  role_fallback?: AgentRole[];
   estimated_cost_usd: number;
   duration_ms: number;
   /** Last non-empty assistant message (truncated) or null. */
@@ -100,6 +119,11 @@ export interface RunManifestInput {
   checkpointPath: string | null;
   devcontainer?: DevcontainerRunInfo;
   provider?: string | null;
+  /** #424 phase segments + role fallbacks + per-role token usage. */
+  phases?: PhaseRecord[];
+  roleFallbacks?: AgentRole[];
+  roleTokens?: Partial<Record<AgentRole, RoleTokenUsage>>;
+  cachedTokens?: number;
   /** Raw run error — used to derive terminalResolution/errorClass/attempts. */
   errorObj?: unknown;
   /** Detected terminal resolution (#446) — supersedes the exitReason mapping when present. */
@@ -124,6 +148,18 @@ export function buildRunManifest(input: RunManifestInput): RunManifest {
     tool_calls_total: input.toolRunCount,
     tokens_in: input.inputTokens,
     tokens_out: input.outputTokens,
+    ...(((input.roleTokens && Object.keys(input.roleTokens).length > 0) || (input.phases?.length ?? 0) > 0) ? {
+      tokens: {
+        byRole: input.roleTokens ?? {},
+        total: {
+          in: input.inputTokens,
+          out: input.outputTokens,
+          ...(input.cachedTokens ? { cached: input.cachedTokens } : {}),
+        },
+      },
+    } : {}),
+    ...(input.phases?.length ? { phases: input.phases } : {}),
+    ...(input.roleFallbacks?.length ? { role_fallback: input.roleFallbacks } : {}),
     estimated_cost_usd: input.costUsd,
     duration_ms: input.durationMs,
     final_message: lastAssistant ? String(lastAssistant.content).slice(0, FINAL_MESSAGE_MAX) : null,
