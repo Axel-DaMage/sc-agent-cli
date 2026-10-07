@@ -27,7 +27,8 @@ import { verbose, verboseSession, verboseError } from '../utils/verbose-logger.j
 import { getWorkspaceGitState, detectSessionMutations, countMutatingToolCalls } from '../utils/mutation-detector.js';
 import { buildRunManifest, emitRunManifest, type RunExitReason } from '../utils/run-manifest.js';
 import { detectSessionResolution } from '../utils/resolution-detector.js';
-import { resolveRolePipeline, phasePolicy, buildPhasePrompt } from '../core/roles.js';
+import { resolveRolePipeline, resolveMaxRoleFixes, runRolePipeline } from '../core/roles.js';
+import type { ReviewerDecision } from '../core/roles.js';
 
 // Multi-line input handler: Enter=submit, Shift+Enter=newline, paste inserts verbatim
 function readUserInput(history: string[], workspaceRoot: string): Promise<string> {
@@ -640,6 +641,12 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   let batchGitStateBefore: ReturnType<typeof getWorkspaceGitState> | null = null;
   let agentError: Error | undefined;
   let budgetExceeded: string | null | undefined;
+  // #462 reviewer/judge consensus state — populated by runRolePipeline in
+  // the batch block; read by emitUsageSummary for the manifest `review`
+  // block (including signal-handler early exits mid-loop).
+  const maxRoleFixes = resolveMaxRoleFixes();
+  let reviewDecision: ReviewerDecision | null = null;
+  let reviewFixRounds = 0;
 
   // Engine-owned artifacts (--summary-file/--output-file/--audit-log) can be
   // written inside the worktree. They are session artifacts, not real repo
@@ -696,6 +703,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       roleFallbacks: agent.getRoleFallbacks(),
       roleTokens: agent.tokenTracker.getRoleUsage(),
       cachedTokens: agent.tokenTracker.getCachedTokens(),
+      review: reviewDecision
+        ? { verdict: reviewDecision.verdict, explicit: reviewDecision.explicit, fixRounds: reviewFixRounds, maxFixes: maxRoleFixes }
+        : undefined,
       resolutionInfo: detectResolutionSafely(exitReason),
       sandbox: agent.getSandboxInfo() ?? undefined,
       sandboxViolations: agent.getSandboxViolations(),
@@ -776,26 +786,28 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     // configured provider/model; absent/invalid mappings fall back to the
     // run's default model and surface as `role_fallback` in the manifest.
     // Without role config the classic single-phase run is preserved.
+    // #462: runRolePipeline owns the consensus loop — a reviewer
+    // request_changes verdict feeds its comments back to the executor for
+    // rework (bounded by SC_ROLE_MAX_FIXES), then re-reviews; a
+    // same-provider+model reviewer warns once.
     const rolePipeline = (options.role || currentConfig.roles)
       ? resolveRolePipeline(currentConfig, options.role)
       : null;
 
     try {
       if (rolePipeline) {
-        for (const res of rolePipeline) {
-          const policy = phasePolicy(res.role);
-          verbose(`[roles] phase ${res.role} → ${res.candidate.id}${res.fallback ? ' (default-model fallback)' : ''}`);
-          if (!isQuiet && options.outputFormat !== 'json') {
-            console.log(chalk.gray(`  │ 🎭 Phase ${res.role} → ${res.candidate.id}${res.fallback ? ' (fallback)' : ''}`));
-          }
-          history = await agent.run(buildPhasePrompt(res.role, userInput), history, undefined, {
-            routing: res,
-            readOnly: policy.readOnly,
-            suppressCompletionGuards: policy.suppressCompletionGuards,
-          });
-          // A budget hit ends the whole run — later phases must not start.
-          if (agent.getStats().budgetExceeded) break;
-        }
+        const result = await runRolePipeline(agent, rolePipeline, userInput, history, {
+          maxFixes: maxRoleFixes,
+          log: (line) => {
+            if (!isQuiet) console.log(chalk.gray(line));
+          },
+          // Warnings ride stderr: the stdout contract (transcript in text
+          // mode, manifest-only under --output-format json) stays intact.
+          warn: (line) => console.error(chalk.yellow(`  ${line}`)),
+        });
+        history = result.history;
+        reviewDecision = result.decision;
+        reviewFixRounds = result.fixRounds;
       } else {
         history = await agent.run(userInput, history);
       }

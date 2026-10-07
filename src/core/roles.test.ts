@@ -4,13 +4,19 @@ import {
   AGENT_ROLES,
   PhaseTracker,
   buildPhasePrompt,
+  buildReworkPrompt,
   isAgentRole,
+  parseReviewerVerdict,
   phasePolicy,
+  resolveMaxRoleFixes,
   resolveRole,
   resolveRolePipeline,
+  reviewerSharesExecutorCandidate,
+  runRolePipeline,
 } from './roles.js';
+import type { AgentRole, RoleResolution } from './roles.js';
 import { primaryCandidate } from './failover.js';
-import type { ProjectConfig } from './types.js';
+import type { Message, ProjectConfig } from './types.js';
 
 const ENV_KEYS = [
   'SC_FAILOVER',
@@ -18,6 +24,7 @@ const ENV_KEYS = [
   'OPENAI_API_KEY',
   'ANTHROPIC_API_KEY',
   'NVIDIA_API_KEY',
+  'SC_ROLE_MAX_FIXES',
 ];
 
 let envBackup: Record<string, string | undefined>;
@@ -193,4 +200,264 @@ test('PhaseTracker: model ids containing "/" survive provider/model splitting', 
   assert.deepEqual(t.getPhases(), [
     { role: 'executor', provider: 'custom', model: 'meta/llama-3.3-70b', iterations: 1 },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// #462 — reviewer verdicts, rework bound, provider diversity
+// ---------------------------------------------------------------------------
+
+test('buildPhasePrompt teaches the reviewer the VERDICT marker contract', () => {
+  const prompt = buildPhasePrompt('reviewer', 'x');
+  assert.match(prompt, /VERDICT: approve/);
+  assert.match(prompt, /VERDICT: request_changes/);
+});
+
+test('parseReviewerVerdict reads explicit VERDICT markers', () => {
+  const ok = parseReviewerVerdict('All checks pass.\nVERDICT: approve');
+  assert.equal(ok.verdict, 'approve');
+  assert.equal(ok.explicit, true);
+  assert.match(ok.comments, /VERDICT: approve/);
+
+  const rc = parseReviewerVerdict('Defects:\n- missing null check in parse()\nVERDICT: request_changes');
+  assert.equal(rc.verdict, 'request_changes');
+  assert.equal(rc.explicit, true);
+  assert.match(rc.comments, /missing null check/);
+
+  // Case-insensitive + markdown-decorated marker values.
+  assert.equal(parseReviewerVerdict('verdict: **REQUEST_CHANGES**').verdict, 'request_changes');
+  assert.equal(parseReviewerVerdict('VERDICT: rejected').verdict, 'request_changes');
+  assert.equal(parseReviewerVerdict('VERDICT: `approved`').verdict, 'approve');
+});
+
+test('parseReviewerVerdict: the last classifiable marker wins', () => {
+  const text = 'VERDICT: request_changes\n\n(author replied; re-checked)\nVERDICT: approve';
+  assert.equal(parseReviewerVerdict(text).verdict, 'approve');
+  // An unclassifiable marker does not mask an earlier valid one.
+  assert.equal(parseReviewerVerdict('VERDICT: approve\nVERDICT: see above').verdict, 'approve');
+});
+
+test('parseReviewerVerdict falls back to prose signals, scanning bottom-up', () => {
+  assert.equal(
+    parseReviewerVerdict('Found defects:\n- build broken\nI cannot approve this.').verdict,
+    'request_changes',
+  );
+  assert.equal(
+    parseReviewerVerdict('Initially requested changes; now resolved.\nApproved.').verdict,
+    'approve',
+  );
+  assert.equal(
+    parseReviewerVerdict('The work is complete and correct.').verdict,
+    'approve',
+  );
+});
+
+test('parseReviewerVerdict defaults to approve on unparseable output (explicit=false)', () => {
+  for (const t of [undefined, '', '   ', 'some inconclusive prose']) {
+    const d = parseReviewerVerdict(t);
+    assert.equal(d.verdict, 'approve', JSON.stringify(t));
+    assert.equal(d.explicit, false);
+  }
+});
+
+test('resolveMaxRoleFixes honors SC_ROLE_MAX_FIXES with default 3', () => {
+  assert.equal(resolveMaxRoleFixes({}), 3);
+  assert.equal(resolveMaxRoleFixes({ SC_ROLE_MAX_FIXES: '5' }), 5);
+  assert.equal(resolveMaxRoleFixes({ SC_ROLE_MAX_FIXES: '0' }), 0);
+  assert.equal(resolveMaxRoleFixes({ SC_ROLE_MAX_FIXES: 'nope' }), 3);
+  assert.equal(resolveMaxRoleFixes({ SC_ROLE_MAX_FIXES: '-2' }), 0);
+});
+
+test('reviewerSharesExecutorCandidate detects same resolved provider+model', () => {
+  const diverse = makeConfig({ roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' } });
+  assert.equal(
+    reviewerSharesExecutorCandidate(resolveRole(diverse, 'executor'), resolveRole(diverse, 'reviewer')),
+    false,
+  );
+
+  const same = makeConfig({ roles: { executor: 'openai/gpt-4o', reviewer: 'openai/gpt-4o' } });
+  assert.equal(
+    reviewerSharesExecutorCandidate(resolveRole(same, 'executor'), resolveRole(same, 'reviewer')),
+    true,
+  );
+
+  // A profile alias resolving to the same endpoint+model still collides —
+  // the comparison is on the serving identity, not the token label.
+  const viaProfile = makeConfig({
+    roles: { executor: 'openai/gpt-4o', reviewer: 'corp/gpt-4o' },
+    profiles: { corp: { baseUrl: 'https://api.openai.com/v1' } },
+  });
+  assert.equal(
+    reviewerSharesExecutorCandidate(resolveRole(viaProfile, 'executor'), resolveRole(viaProfile, 'reviewer')),
+    true,
+  );
+
+  // Both roles falling back to the default model collide too.
+  const bare = makeConfig();
+  assert.equal(
+    reviewerSharesExecutorCandidate(resolveRole(bare, 'executor'), resolveRole(bare, 'reviewer')),
+    true,
+  );
+});
+
+test('buildReworkPrompt carries reviewer comments, round bound, and the task', () => {
+  const p = buildReworkPrompt('fix the bug', 'defects: bad null check\nVERDICT: request_changes', 2, 3);
+  assert.match(p, /REWORK 2\/3/);
+  assert.match(p, /bad null check/);
+  assert.match(p, /fix the bug/);
+});
+
+// ---------------------------------------------------------------------------
+// #462 — runRolePipeline consensus loop (scripted agent stub)
+// ---------------------------------------------------------------------------
+
+/** Scripted PhaseAgent: replays per-role responses, records every phase call. */
+function makeScriptedAgent(
+  script: Partial<Record<AgentRole, string[]>>,
+  opts: { budgetExceededAfter?: number } = {},
+) {
+  const calls: Array<{
+    role: AgentRole | undefined;
+    prompt: string;
+    readOnly?: boolean;
+    suppressCompletionGuards?: boolean;
+  }> = [];
+  const queues = new Map<AgentRole, string[]>();
+  for (const [k, v] of Object.entries(script)) queues.set(k as AgentRole, [...v]);
+  return {
+    calls,
+    async run(
+      prompt: string,
+      history: Message[] = [],
+      _signal?: AbortSignal,
+      phase?: { routing?: RoleResolution; readOnly?: boolean; suppressCompletionGuards?: boolean },
+    ): Promise<Message[]> {
+      const role = phase?.routing?.role;
+      calls.push({
+        role,
+        prompt,
+        readOnly: phase?.readOnly,
+        suppressCompletionGuards: phase?.suppressCompletionGuards,
+      });
+      const q = role ? queues.get(role) : undefined;
+      const content = q && q.length > 0 ? q.shift()! : `${role ?? 'agent'} reply`;
+      return [...history, { role: 'user', content: prompt }, { role: 'assistant', content }];
+    },
+    getStats() {
+      return {
+        budgetExceeded:
+          opts.budgetExceededAfter !== undefined && calls.length > opts.budgetExceededAfter
+            ? 'steps'
+            : null,
+      };
+    },
+  };
+}
+
+test('runRolePipeline: request_changes loops back to the executor, then approve ends it', async () => {
+  const agent = makeScriptedAgent({
+    planner: ['1. inspect\n2. edit'],
+    executor: ['implemented v1', 'implemented v2'],
+    reviewer: ['defects: missing null check\nVERDICT: request_changes', 'all fixed\nVERDICT: approve'],
+  });
+  const cfg = makeConfig({ roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' } });
+  const res = await runRolePipeline(agent, resolveRolePipeline(cfg), 'implement the fix');
+
+  assert.deepEqual(agent.calls.map(c => c.role), ['planner', 'executor', 'reviewer', 'executor', 'reviewer']);
+  assert.equal(res.fixRounds, 1);
+  assert.equal(res.maxFixes, 3);
+  assert.equal(res.decision?.verdict, 'approve');
+  // The rework prompt carries the reviewer comments back to the executor.
+  assert.match(agent.calls[3].prompt, /REWORK 1\/3/);
+  assert.match(agent.calls[3].prompt, /missing null check/);
+  assert.match(agent.calls[3].prompt, /implement the fix/);
+  // The reviewer phase ran under its read-only/guard-suppressed policy.
+  for (const call of agent.calls.filter(c => c.role === 'reviewer')) {
+    assert.equal(call.readOnly, true);
+    assert.equal(call.suppressCompletionGuards, true);
+  }
+});
+
+test('runRolePipeline: rework loop is bounded by maxFixes (SC_ROLE_MAX_FIXES)', async () => {
+  const agent = makeScriptedAgent({
+    executor: ['v1', 'v2', 'v3'],
+    reviewer: ['VERDICT: request_changes', 'VERDICT: request_changes', 'VERDICT: request_changes'],
+  });
+  const cfg = makeConfig({ roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' } });
+  const res = await runRolePipeline(agent, resolveRolePipeline(cfg), 'task', [], { maxFixes: 2 });
+
+  // planner (fallback) + executor + [reviewer → rework] × 2 + final review.
+  assert.deepEqual(
+    agent.calls.map(c => c.role),
+    ['planner', 'executor', 'reviewer', 'executor', 'reviewer', 'executor', 'reviewer'],
+  );
+  assert.equal(res.fixRounds, 2);
+  assert.equal(res.decision?.verdict, 'request_changes'); // bound hit — findings unresolved
+});
+
+test('runRolePipeline: maxFixes=0 disables rework but still records the verdict', async () => {
+  const agent = makeScriptedAgent({
+    executor: ['impl'],
+    reviewer: ['VERDICT: request_changes'],
+  });
+  const cfg = makeConfig({ roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' } });
+  const res = await runRolePipeline(agent, resolveRolePipeline(cfg), 'task', [], { maxFixes: 0 });
+
+  assert.deepEqual(agent.calls.map(c => c.role), ['planner', 'executor', 'reviewer']);
+  assert.equal(res.fixRounds, 0);
+  assert.equal(res.decision?.verdict, 'request_changes');
+});
+
+test('runRolePipeline: an approve verdict runs the pipeline straight through', async () => {
+  const agent = makeScriptedAgent({
+    executor: ['impl'],
+    reviewer: ['looks complete\nVERDICT: approve'],
+  });
+  const cfg = makeConfig({ roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' } });
+  const res = await runRolePipeline(agent, resolveRolePipeline(cfg), 'task');
+
+  assert.deepEqual(agent.calls.map(c => c.role), ['planner', 'executor', 'reviewer']);
+  assert.equal(res.fixRounds, 0);
+  assert.equal(res.decision?.verdict, 'approve');
+});
+
+test('runRolePipeline: a pinned --role reviewer run records the verdict but never loops', async () => {
+  const agent = makeScriptedAgent({ reviewer: ['VERDICT: request_changes'] });
+  const cfg = makeConfig({
+    roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' },
+  });
+  const res = await runRolePipeline(agent, resolveRolePipeline(cfg, 'reviewer'), 'task');
+
+  assert.deepEqual(agent.calls.map(c => c.role), ['reviewer']);
+  assert.equal(res.decision?.verdict, 'request_changes');
+  assert.equal(res.fixRounds, 0);
+});
+
+test('runRolePipeline warns once when reviewer shares the executor provider+model', async () => {
+  const warns: string[] = [];
+  const cfg = makeConfig({ roles: { executor: 'openai/gpt-4o', reviewer: 'openai/gpt-4o' } });
+  await runRolePipeline(makeScriptedAgent({}), resolveRolePipeline(cfg), 'task', [], {
+    warn: l => warns.push(l),
+  });
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /same provider\+model/);
+});
+
+test('runRolePipeline: no diversity warning when the reviewer uses another provider', async () => {
+  const warns: string[] = [];
+  const cfg = makeConfig({ roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' } });
+  await runRolePipeline(makeScriptedAgent({}), resolveRolePipeline(cfg), 'task', [], {
+    warn: l => warns.push(l),
+  });
+  assert.equal(warns.length, 0);
+});
+
+test('runRolePipeline: a budget hit stops later phases and rework rounds', async () => {
+  const agent = makeScriptedAgent({}, { budgetExceededAfter: 1 });
+  const res = await runRolePipeline(
+    agent,
+    resolveRolePipeline(makeConfig({ roles: { executor: 'openai/gpt-4o-mini' } })),
+    'task',
+  );
+  assert.deepEqual(agent.calls.map(c => c.role), ['planner', 'executor']);
+  assert.equal(res.decision, null);
 });

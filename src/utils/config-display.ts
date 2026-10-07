@@ -44,6 +44,7 @@ export async function showConfig(
   const envMaxStorage = process.env.SC_MAX_STORAGE_GB;
   const envSandbox = process.env.SC_SANDBOX;
   const envRole = process.env.SC_ROLE;
+  const envRoleMaxFixes = process.env.SC_ROLE_MAX_FIXES;
   const envFailover = process.env.SC_FAILOVER;
   const envContextBudget = process.env.SC_CONTEXT_BUDGET_TOKENS;
 
@@ -68,6 +69,7 @@ export async function showConfig(
   if (envMaxStorage) overrides.push('SC_MAX_STORAGE_GB');
   if (envSandbox) overrides.push('SC_SANDBOX');
   if (envRole) overrides.push('SC_ROLE');
+  if (envRoleMaxFixes) overrides.push('SC_ROLE_MAX_FIXES');
   if (envFailover) overrides.push('SC_FAILOVER');
   if (envContextBudget) overrides.push('SC_CONTEXT_BUDGET_TOKENS');
 
@@ -92,13 +94,14 @@ export async function showConfig(
   // ── Multi-model orchestration (#424) ──
   const roles = config.roles ?? {};
   const roleNames = Object.keys(roles);
-  if (roleNames.length > 0 || envRole || envFailover) {
+  if (roleNames.length > 0 || envRole || envRoleMaxFixes || envFailover) {
     section('Orchestration');
     for (const role of ['planner', 'executor', 'reviewer'] as const) {
       const mapped = roles[role];
       field(role, mapped ?? 'default model', mapped ? chalk.cyan : chalk.gray);
     }
     if (envRole) field('SC_ROLE', envRole, chalk.yellow);
+    if (envRoleMaxFixes) field('SC_ROLE_MAX_FIXES', envRoleMaxFixes, chalk.yellow);
     if (envFailover) field('SC_FAILOVER', envFailover, chalk.yellow);
   }
 
@@ -186,6 +189,7 @@ export async function showConfig(
   console.log(` ${chalk.white('SC_SANDBOX'.padEnd(22))} ${chalk.gray('Force sandbox on/off (1/0, overrides config)')}`);
   console.log(` ${chalk.white('SC_FAILOVER'.padEnd(22))} ${chalk.gray('Ordered provider/model cascade')}`);
   console.log(` ${chalk.white('SC_ROLE'.padEnd(22))} ${chalk.gray('Pin headless run to one phase (planner|executor|reviewer)')}`);
+  console.log(` ${chalk.white('SC_ROLE_MAX_FIXES'.padEnd(22))} ${chalk.gray('Reviewer request_changes rework bound (default: 3)')}`);
   console.log(` ${chalk.white('SC_CONTEXT_BUDGET_TOKENS'.padEnd(22))} ${chalk.gray('System-prompt injection cap in est. tokens (default: uncapped)')}`);
 
   console.log();

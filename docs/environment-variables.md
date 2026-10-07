@@ -98,6 +98,20 @@ See [non-interactive-mode.md](non-interactive-mode.md#multi-model-orchestration-
 
 ---
 
+### SC_ROLE_MAX_FIXES
+
+Bounds the reviewer ↔ executor consensus loop in orchestrated runs. When the reviewer phase emits `VERDICT: request_changes`, its comments are sent back to the executor for a rework round and the reviewer re-reviews — at most this many rounds. A terminal `request_changes` at the bound is recorded in the manifest's `review` block (`verdict`, `fix_rounds`, `max_fixes`).
+
+**Default:** `3` (`0` disables the rework loop — the review still runs once and its verdict is recorded)
+
+```bash
+# Allow up to 5 executor rework rounds per run
+export SC_ROLE_MAX_FIXES=5
+scc chat -yq "implement issue #462"
+```
+
+---
+
 ### SC_PROVIDER_CONNECT_TIMEOUT_MS
 
 Maximum time (ms) to wait for response headers on each provider attempt.

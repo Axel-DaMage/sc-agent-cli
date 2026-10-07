@@ -133,6 +133,38 @@ test('buildRunManifest omits cached token fields when the provider reports none'
   assert.deepEqual(m.tokens!.byRole.executor, { in: 10, out: 5 });
 });
 
+test('buildRunManifest emits reviewer role usage + #462 consensus review block', () => {
+  const m = buildRunManifest(baseInput({
+    phases: [
+      { role: 'executor', provider: 'openai', model: 'gpt-4o-mini', iterations: 4 },
+      { role: 'reviewer', provider: 'anthropic', model: 'claude-sonnet-4-6', iterations: 2 },
+      { role: 'executor', provider: 'openai', model: 'gpt-4o-mini', iterations: 2 },
+      { role: 'reviewer', provider: 'anthropic', model: 'claude-sonnet-4-6', iterations: 1 },
+    ],
+    roleTokens: {
+      executor: { in: 500, out: 120 },
+      reviewer: { in: 260, out: 80 },
+    },
+    review: { verdict: 'request_changes', explicit: true, fixRounds: 3, maxFixes: 3 },
+  }));
+
+  // Role-scoped token usage lands under tokens.byRole.reviewer (#462).
+  assert.deepEqual(m.tokens!.byRole.reviewer, { in: 260, out: 80 });
+  assert.deepEqual(m.review, {
+    verdict: 'request_changes',
+    explicit: true,
+    fix_rounds: 3,
+    max_fixes: 3,
+  });
+});
+
+test('buildRunManifest omits the review block when no reviewer verdict ran', () => {
+  assert.ok(!('review' in buildRunManifest(baseInput())));
+  assert.ok(!('review' in buildRunManifest(baseInput({
+    phases: [{ role: 'planner', provider: 'openai', model: 'gpt-4o', iterations: 1 }],
+  }))));
+});
+
 test('emitRunManifest writes the manifest file and stdout line', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sc-manifest-'));
   const outFile = join(dir, 'run.json');

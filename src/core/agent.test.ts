@@ -1,7 +1,7 @@
 import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { pruneMessageHistory, limitMessageHistory, Agent } from './agent.js';
-import { resolveRole, phasePolicy } from './roles.js';
+import { resolveRole, resolveRolePipeline, phasePolicy, runRolePipeline } from './roles.js';
 import { writeFileTool } from '../tools/write-file.js';
 import { estimateTokens } from '../utils/token-tracker.js';
 import type { Message } from './types.js';
@@ -580,6 +580,94 @@ test('Agent.run restores the default failover chain after a phase (#424)', async
   const res2 = resolveRole(agent.options.config, 'planner');
   await agent.run('plan task', [], undefined, { routing: res2, ...phasePolicy('planner') });
   assert.equal(agent.getPhases().length, 2);
+});
+
+// --- Reviewer/judge consensus loop (#462) ---
+
+test('runRolePipeline drives request_changes → executor rework → re-review and scopes reviewer tokens (#462)', async () => {
+  const prev = process.env.SC_ZERO_MUTATION_REPROMPTS;
+  // The scripted executor answers in prose — disable the zero-mutation
+  // re-prompt budget so phase calls map 1:1 onto the scripted replies.
+  process.env.SC_ZERO_MUTATION_REPROMPTS = '0';
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      autoApprove: true,
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        },
+        roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' },
+      },
+    });
+    const replies = [
+      '1. inspect\n2. edit\n3. verify',                              // planner (default-model fallback)
+      'implemented the fix',                                         // executor
+      'defects: missing test coverage\nVERDICT: request_changes',    // reviewer
+      'added the missing coverage',                                  // executor rework round
+      'VERDICT: approve',                                            // re-review
+    ];
+    vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: replies.shift() ?? 'done' }));
+
+    const res = await runRolePipeline(agent, resolveRolePipeline(agent.options.config), 'implement the fix');
+
+    assert.equal(res.decision?.verdict, 'approve');
+    assert.equal(res.fixRounds, 1);
+    // The append-only segment log records each rework + re-review segment.
+    assert.deepEqual(
+      agent.getPhases().map(p => p.role),
+      ['planner', 'executor', 'reviewer', 'executor', 'reviewer'],
+    );
+    // Per-role token accounting feeds the manifest's tokens.byRole.
+    const byRole = agent.tokenTracker.getRoleUsage();
+    for (const role of ['planner', 'executor', 'reviewer'] as const) {
+      assert.ok(byRole[role], `expected ${role} role token usage`);
+      assert.ok(byRole[role]!.in > 0 && byRole[role]!.out > 0, `${role} usage must be non-zero`);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.SC_ZERO_MUTATION_REPROMPTS;
+    else process.env.SC_ZERO_MUTATION_REPROMPTS = prev;
+  }
+});
+
+test('runRolePipeline warns once when the reviewer resolves to the executor provider+model (#462)', async () => {
+  const prev = process.env.SC_ZERO_MUTATION_REPROMPTS;
+  process.env.SC_ZERO_MUTATION_REPROMPTS = '0';
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      autoApprove: true,
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        },
+        roles: { executor: 'openai/gpt-4o', reviewer: 'openai/gpt-4o' },
+      },
+    });
+    const replies = [
+      'plan',
+      'implemented',
+      'VERDICT: approve',
+    ];
+    vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: replies.shift() ?? 'done' }));
+
+    const warns: string[] = [];
+    await runRolePipeline(agent, resolveRolePipeline(agent.options.config), 'task', [], {
+      warn: l => warns.push(l),
+    });
+
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /same provider\+model/);
+  } finally {
+    if (prev === undefined) delete process.env.SC_ZERO_MUTATION_REPROMPTS;
+    else process.env.SC_ZERO_MUTATION_REPROMPTS = prev;
+  }
 });
 
 // --- Context-spend accounting + injection budget guard (#422) ---

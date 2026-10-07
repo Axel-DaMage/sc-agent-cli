@@ -5,7 +5,7 @@ import { ProviderFailoverError, type CandidateAttempt } from '../core/failover.j
 import { EXIT_CODES, classifyError } from './exit-codes.js';
 import type { DevcontainerRunInfo } from '../core/devcontainer.js';
 import type { SandboxRunInfo, SandboxViolation } from './sandbox.js';
-import type { AgentRole, PhaseRecord } from '../core/roles.js';
+import type { AgentRole, PhaseRecord, ReviewerVerdict } from '../core/roles.js';
 import type { RoleTokenUsage } from './token-tracker.js';
 import type { ResolutionResult } from './resolution-detector.js';
 import type { ContextBudgetReport } from './context-budget.js';
@@ -71,6 +71,19 @@ export interface RunManifest {
   phases?: PhaseRecord[];
   /** #424 roles that fell back to the run's default model (absent/invalid mapping). */
   role_fallback?: AgentRole[];
+  /**
+   * #462 reviewer/judge consensus outcome — present only when a reviewer
+   * phase produced a verdict. `fix_rounds` counts executor rework passes
+   * consumed by request_changes loops (bounded by `max_fixes` =
+   * SC_ROLE_MAX_FIXES); `explicit` is false when the verdict was inferred
+   * from prose instead of an explicit `VERDICT:` marker.
+   */
+  review?: {
+    verdict: ReviewerVerdict;
+    explicit: boolean;
+    fix_rounds: number;
+    max_fixes: number;
+  };
   estimated_cost_usd: number;
   duration_ms: number;
   /** Last non-empty assistant message (truncated) or null. */
@@ -129,6 +142,8 @@ export interface RunManifestInput {
   roleFallbacks?: AgentRole[];
   roleTokens?: Partial<Record<AgentRole, RoleTokenUsage>>;
   cachedTokens?: number;
+  /** #462 consensus outcome — terminal reviewer verdict + rework accounting. */
+  review?: { verdict: ReviewerVerdict; explicit: boolean; fixRounds: number; maxFixes: number };
   /** Raw run error — used to derive terminalResolution/errorClass/attempts. */
   errorObj?: unknown;
   /** Detected terminal resolution (#446) — supersedes the exitReason mapping when present. */
@@ -168,6 +183,16 @@ export function buildRunManifest(input: RunManifestInput): RunManifest {
     } : {}),
     ...(input.phases?.length ? { phases: input.phases } : {}),
     ...(input.roleFallbacks?.length ? { role_fallback: input.roleFallbacks } : {}),
+    ...(input.review
+      ? {
+          review: {
+            verdict: input.review.verdict,
+            explicit: input.review.explicit,
+            fix_rounds: input.review.fixRounds,
+            max_fixes: input.review.maxFixes,
+          },
+        }
+      : {}),
     estimated_cost_usd: input.costUsd,
     duration_ms: input.durationMs,
     final_message: lastAssistant ? String(lastAssistant.content).slice(0, FINAL_MESSAGE_MAX) : null,

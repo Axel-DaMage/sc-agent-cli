@@ -259,6 +259,14 @@ SC_ROLE=reviewer sc chat -yq --output-format json "…"       # reviewer phase o
 
 Each phase re-roots the provider chain at its role's candidate — `SC_FAILOVER` still cascades behind it, and a role candidate never forwards the primary model's API key to a different host (same credential isolation as the cascade).
 
+### Reviewer consensus loop (#462)
+
+The reviewer phase is a *judge*: its prompt requires a terminal verdict line — `VERDICT: approve` or `VERDICT: request_changes`. On `request_changes` the reviewer comments are sent back to the executor for a rework round, after which the reviewer re-reviews the updated workspace — bounded by `SC_ROLE_MAX_FIXES` (default `3`; `0` disables the loop, the review still runs once). Reviewer output without a marker falls back to bottom-up prose signal detection; unparseable output defaults to `approve` (`explicit: false` in the manifest) — rework is never forced without affirmative defect evidence.
+
+Review benefits from *provider diversity*: when the reviewer role resolves to the same provider+model as the executor — including both falling back to the default model — the run emits a one-time **stderr** warning (a model grading its own work). It is a warning, not a failure.
+
+A `--role`/`SC_ROLE` pin never loops: the single phase runs once and the reviewer verdict is still parsed into the manifest `review` block.
+
 ### Manifest fields
 
 ```json
@@ -273,12 +281,14 @@ Each phase re-roots the provider chain at its role's candidate — `SC_FAILOVER`
                      "executor":{"in":41000,"out":5300,"cached":9000},
                      "reviewer":{"in":26000,"out":800}},
            "total":{"in":75300,"out":7300,"cached":9000}},
+ "review":{"verdict":"approve","explicit":true,"fix_rounds":1,"max_fixes":3},
  "iterations":17,"exit_reason":"success", ...}
 ```
 
-- `phases` — append-only segment log: each entry records `role`, serving `provider`/`model`, and completed LLM `iterations`. Phase retries and mid-phase `SC_FAILOVER` cascades **append** entries (above, the executor cascaded to Ollama mid-phase) rather than overwriting.
+- `phases` — append-only segment log: each entry records `role`, serving `provider`/`model`, and completed LLM `iterations`. Phase retries and mid-phase `SC_FAILOVER` cascades **append** entries (above, the executor cascaded to Ollama mid-phase) rather than overwriting — rework rounds and re-reviews append executor/reviewer segments the same way (#462).
 - `role_fallback` — roles whose configured mapping was absent or invalid and ran on the default model.
-- `tokens.byRole` — input/output (and `cached`, when the provider reports it) attributed per role; `tokens.total` mirrors `tokens_in`/`tokens_out`. `estimated_cost_usd` prices each role at its serving model.
+- `tokens.byRole` — input/output (and `cached`, when the provider reports it) attributed per role — `tokens.byRole.reviewer` aggregates usage across the initial review and every re-review; `tokens.total` mirrors `tokens_in`/`tokens_out`. `estimated_cost_usd` prices each role at its serving model.
+- `review` — #462 consensus outcome, present when a reviewer phase produced a verdict: `verdict` (`approve`/`request_changes`), `explicit` (false = verdict inferred from prose), `fix_rounds` (executor rework passes consumed), `max_fixes` (the `SC_ROLE_MAX_FIXES` bound).
 - `iterations` — total LLM iterations across all phases.
 
 Usage capture: when `stream` is enabled the provider is asked for `stream_options.include_usage`, and a reported `usage` object (streamed or not) supersedes the chars/4 heuristic in the tracker. Providers that don't report usage keep the estimate.
