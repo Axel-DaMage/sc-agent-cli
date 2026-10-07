@@ -40,5 +40,9 @@
     "readOnlyPaths": [],
     "writablePaths": ["cache"],
     "seccomp": false
+  },
+  "context": {
+    "_comment": "Context injection mode (#461): 'full' (default) injects AGENTS.md/CLAUDE.md verbatim; 'skeleton' injects a generated repo map instead — the agent pulls file bodies via read_file. SC_CONTEXT_MODE env overrides this.",
+    "mode": "full"
   }
 }

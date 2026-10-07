@@ -162,6 +162,19 @@ export async function loadConfig(
     }
   }
 
+  // Context injection mode (#461): SC_CONTEXT_MODE wins over
+  // `context.mode` in config so CI/headless runs can force the repo-map
+  // skeleton without editing files.
+  const envContextMode = process.env.SC_CONTEXT_MODE;
+  if (envContextMode !== undefined && envContextMode.trim() !== '') {
+    const v = envContextMode.trim().toLowerCase();
+    if (v === 'full' || v === 'skeleton') {
+      config.context = { ...config.context, mode: v };
+    } else {
+      throw new Error(`Invalid SC_CONTEXT_MODE value "${envContextMode}" (expected 'full' or 'skeleton')`);
+    }
+  }
+
   // Validate required fields
   validateConfig(config);
 
@@ -233,6 +246,17 @@ export function validateConfig(config: ProjectConfig): void {
       } else if (body.includes(':') && !body.startsWith('[') && (body.match(/:/g) ?? []).length === 1) {
         throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": malformed port`);
       }
+    }
+  }
+
+  // Context injection mode block (#461).
+  const context = config.context;
+  if (context !== undefined) {
+    if (context === null || typeof context !== 'object' || Array.isArray(context)) {
+      throw new Error('Invalid context config: expected an object');
+    }
+    if (context.mode !== undefined && context.mode !== 'full' && context.mode !== 'skeleton') {
+      throw new Error(`Invalid context.mode: "${context.mode}" (expected 'full' or 'skeleton')`);
     }
   }
 }

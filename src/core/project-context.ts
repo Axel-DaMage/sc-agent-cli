@@ -47,13 +47,8 @@ export async function loadProjectContext(
 
   // Load external policy file if configured (e.g. ADEV.md as base doctrine)
   if (policyFile) {
-    try {
-      const safePath = resolveSafePath(policyFile, workspaceRoot, MINIMAL_CONFIG);
-      const content = await readFile(safePath, 'utf-8');
-      parts.push(`# Policy: ${path.basename(safePath)}\n${content}`);
-    } catch {
-      // Fail silently — policy is best-effort
-    }
+    const policy = await loadPolicyFile(workspaceRoot, policyFile);
+    if (policy) parts.push(policy);
   }
 
   const result = parts.length > 0 ? parts.join('\n\n---\n\n') : null;
@@ -62,6 +57,26 @@ export async function loadProjectContext(
   contextCache = { workspaceRoot, policyFile, content: result };
 
   return result;
+}
+
+/**
+ * Load just the configured policy file (#461). In skeleton context mode the
+ * auto-discovered context files (AGENTS.md & co.) are replaced by the repo
+ * map, but an explicitly configured policyFile is operator doctrine and is
+ * still injected — this loader backs that path. Best-effort: unreadable or
+ * denied paths return null instead of throwing.
+ */
+export async function loadPolicyFile(
+  workspaceRoot: string,
+  policyFile: string
+): Promise<string | null> {
+  try {
+    const safePath = resolveSafePath(policyFile, workspaceRoot, MINIMAL_CONFIG);
+    const content = await readFile(safePath, 'utf-8');
+    return `# Policy: ${path.basename(safePath)}\n${content}`;
+  } catch {
+    return null;
+  }
 }
 
 // Clear cache (useful for testing or when workspace changes)

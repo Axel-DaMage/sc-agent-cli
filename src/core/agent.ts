@@ -5,7 +5,8 @@ import { resolveFailoverChain } from './failover.js';
 import type { CandidateAttempt } from './failover.js';
 import { PhaseTracker, READ_ONLY_PHASE_DENIED_TOOLS } from './roles.js';
 import type { AgentRole, PhaseRecord, RoleResolution } from './roles.js';
-import { loadProjectContext } from './project-context.js';
+import { loadProjectContext, loadPolicyFile } from './project-context.js';
+import { generateRepoMap } from './repo-map.js';
 import { probeRepo, formatRepoProfileForPrompt } from './repo-probe/index.js';
 import { ALL_TOOLS, getToolByName } from '../tools/registry.js';
 import type { ToolContext } from '../tools/tool.js';
@@ -1054,13 +1055,33 @@ export class Agent {
       // Only load project context for project-related queries (not for casual conversation)
       const userQuery = userMessage;
       const isProjectQuery = /\b(file|code|test|build|install|run|debug|fix|error|implement|refactor|check|verify|review|analyze|src\/|\.ts|\.js|\.json|\.yaml|\.yml|\.md|\.sh|\.py|\.java|\.go|\.rb|\.c|\.cpp|\.h|package|config|git|npm|pnpm|yarn|mvn|gradle|cargo|pip|docker|create|write|edit|read|search|grep|find|directory|folder|function|class|method|variable|import|export|module|component|service|controller|repository|endpoint|api|route|database|query|schema|migration|deploy|lint|format|commit|push|pull|merge|branch|tag|release|version|dependency|dependencies|bug|issue|feature|docs|documentation|README|LICENSE|Makefile|Dockerfile|workflow|action|pipeline|ci|cd|devops|kubernetes|helm|terraform|ansible)\b/i.test(userQuery);
-      const projectContext = isProjectQuery
-        ? await loadProjectContext(this.options.workspaceRoot, policyFile)
-        : null;
+
+      // Context injection mode (#461): 'skeleton' swaps the whole-file
+      // project-context injection for a generated repo map (`repo_map`
+      // source) — the agent pulls file bodies via read_file on demand.
+      // An explicitly configured policyFile is operator doctrine and is
+      // still injected (as project_context) even in skeleton mode.
+      const contextMode = this.options.config.context?.mode ?? 'full';
+      let projectContext: string | null = null;
+      let repoMapContext: string | null = null;
+      if (isProjectQuery) {
+        if (contextMode === 'skeleton') {
+          try {
+            repoMapContext = await generateRepoMap(this.options.workspaceRoot, this.options.config);
+          } catch {
+            // Non-fatal: fall back to no index rather than failing the run.
+          }
+          projectContext = policyFile
+            ? await loadPolicyFile(this.options.workspaceRoot, policyFile)
+            : null;
+        } else {
+          projectContext = await loadProjectContext(this.options.workspaceRoot, policyFile);
+        }
+      }
 
       // Metrics: log context loading decision (optional - only if SC_DEBUG_METRICS is set)
       if (process.env.SC_DEBUG_METRICS) {
-        verbose(`[METRICS] Context loading: ${isProjectQuery ? 'LOADED' : 'SKIPPED'} | Query length: ${userQuery.length} | Context size: ${projectContext?.length || 0}B`);
+        verbose(`[METRICS] Context loading: ${isProjectQuery ? 'LOADED' : 'SKIPPED'} | mode: ${contextMode} | Query length: ${userQuery.length} | Context size: ${projectContext?.length || 0}B | Repo map: ${repoMapContext?.length || 0}B`);
       }
 
       let repoProfileContext: string | null = null;
@@ -1088,6 +1109,7 @@ export class Agent {
         { source: 'shell', text: `${shellContext}\n${shellPromptGuide}` },
       ];
       if (repoProfileContext) contextSources.push({ source: 'repo_profile', text: repoProfileContext });
+      if (repoMapContext) contextSources.push({ source: 'repo_map', text: repoMapContext });
       if (projectContext) contextSources.push({ source: 'project_context', text: `\n# Project Context\n${projectContext}` });
       if (memoryContext) contextSources.push({ source: 'memory', text: memoryContext });
       if (this.options.autoApprove) {

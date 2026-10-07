@@ -66,7 +66,7 @@ test('loadConfig surfaces invalid project config JSON with file path and recover
   );
 });
 
-const ENV_KEYS = ['SC_BASE_URL', 'SC_MODEL', 'SC_PROFILE', 'SC_API_KEY', 'SC_SANDBOX'] as const;
+const ENV_KEYS = ['SC_BASE_URL', 'SC_MODEL', 'SC_PROFILE', 'SC_API_KEY', 'SC_SANDBOX', 'SC_CONTEXT_MODE'] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -204,4 +204,41 @@ test('loadConfig: project config sandbox block flows through deepMerge', async (
   assert.equal(config.sandbox?.enabled, true);
   assert.deepEqual(config.sandbox?.egressAllowlist, ['api.github.com:443']);
   assert.deepEqual(config.sandbox?.writablePaths, ['cache']);
+});
+
+// --- context injection mode (#461) -------------------------------------------
+
+test('loadConfig: context.mode from project config and SC_CONTEXT_MODE env override', async () => {
+  const projectRoot = await createProjectWithConfig({ context: { mode: 'skeleton' } });
+
+  const fromFile = await loadIsolated(projectRoot);
+  assert.equal(fromFile.context?.mode, 'skeleton');
+
+  process.env.SC_CONTEXT_MODE = 'full';
+  const overridden = await loadIsolated(projectRoot);
+  assert.equal(overridden.context?.mode, 'full', 'env wins over the config file');
+
+  process.env.SC_CONTEXT_MODE = ' SKELETON ';
+  const normalized = await loadIsolated(projectRoot);
+  assert.equal(normalized.context?.mode, 'skeleton', 'env value is trimmed/lowercased');
+
+  process.env.SC_CONTEXT_MODE = 'weird';
+  await assert.rejects(() => loadIsolated(projectRoot), /Invalid SC_CONTEXT_MODE/);
+});
+
+test('validateConfig rejects malformed context block values', async () => {
+  const base = () => createConfig('http://localhost:11434/v1');
+  for (const mutate of [
+    (c: ProjectConfig) => { c.context = { mode: 'tree-sitter' as never }; },
+    (c: ProjectConfig) => { c.context = 'skeleton' as unknown as ProjectConfig['context']; },
+    (c: ProjectConfig) => { c.context = [] as unknown as ProjectConfig['context']; },
+  ]) {
+    const cfg = base();
+    mutate(cfg);
+    assert.throws(() => validateConfig(cfg), /context/i);
+  }
+  assert.doesNotThrow(() => validateConfig(base()));
+  const ok = base();
+  ok.context = { mode: 'skeleton' };
+  assert.doesNotThrow(() => validateConfig(ok));
 });

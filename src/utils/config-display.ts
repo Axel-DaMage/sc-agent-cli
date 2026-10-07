@@ -47,6 +47,7 @@ export async function showConfig(
   const envRoleMaxFixes = process.env.SC_ROLE_MAX_FIXES;
   const envFailover = process.env.SC_FAILOVER;
   const envContextBudget = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  const envContextMode = process.env.SC_CONTEXT_MODE;
 
   // ── Model ──
   section('Model');
@@ -72,6 +73,7 @@ export async function showConfig(
   if (envRoleMaxFixes) overrides.push('SC_ROLE_MAX_FIXES');
   if (envFailover) overrides.push('SC_FAILOVER');
   if (envContextBudget) overrides.push('SC_CONTEXT_BUDGET_TOKENS');
+  if (envContextMode) overrides.push('SC_CONTEXT_MODE');
 
   if (overrides.length > 0) {
     section('Environment Overrides');
@@ -135,6 +137,15 @@ export async function showConfig(
     field('Deny rules', 'permissions.denyPaths/denyCommands still apply (deny wins)', chalk.gray);
   }
 
+  // ── Context injection (#461) ──
+  section('Context');
+  const ctxMode = config.context?.mode ?? 'full';
+  field('Mode', envContextMode ? `${ctxMode} (via SC_CONTEXT_MODE)` : ctxMode,
+    ctxMode === 'skeleton' ? chalk.cyan : chalk.gray);
+  if (ctxMode === 'skeleton') {
+    field('Effect', 'project files → generated repo map; bodies via read_file', chalk.gray);
+  }
+
   // ── Tools ──
   section('Tools (10)');
   console.log(` ${chalk.gray('  read_file     list_dir      search_text  (auto-approved)')}`);
@@ -191,6 +202,7 @@ export async function showConfig(
   console.log(` ${chalk.white('SC_ROLE'.padEnd(22))} ${chalk.gray('Pin headless run to one phase (planner|executor|reviewer)')}`);
   console.log(` ${chalk.white('SC_ROLE_MAX_FIXES'.padEnd(22))} ${chalk.gray('Reviewer request_changes rework bound (default: 3)')}`);
   console.log(` ${chalk.white('SC_CONTEXT_BUDGET_TOKENS'.padEnd(22))} ${chalk.gray('System-prompt injection cap in est. tokens (default: uncapped)')}`);
+  console.log(` ${chalk.white('SC_CONTEXT_MODE'.padEnd(22))} ${chalk.gray('Context injection mode: full|skeleton (overrides context.mode)')}`);
 
   console.log();
 }

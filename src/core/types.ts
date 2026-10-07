@@ -89,6 +89,20 @@ export interface ThrottleConfig {
   mode: 'auto' | 'fixed' | 'exponential';
 }
 
+/**
+ * Context injection mode (#461). 'full' (default) injects the discovered
+ * context files (AGENTS.md / SC-AGENT.md / CLAUDE.md) verbatim; 'skeleton'
+ * replaces that file-content injection with a generated repo map —
+ * per-file symbols, signatures, and import edges — emitted as the
+ * `repo_map` budget source so the agent pulls file bodies via read_file
+ * on demand. `SC_CONTEXT_MODE` overrides the config value.
+ */
+export type ContextMode = 'full' | 'skeleton';
+
+export interface ContextConfig {
+  mode?: ContextMode;
+}
+
 export interface ProjectConfig {
   model: ModelConfig;
   permissions?: {
@@ -108,6 +122,7 @@ export interface ProjectConfig {
    * `role_fallback` in the run manifest).
    */
   roles?: Partial<Record<AgentRole, string>>;
+  context?: ContextConfig; // Context injection mode (#461) — default 'full'
   mcp?: {
     servers?: Record<string, {
       command: string;

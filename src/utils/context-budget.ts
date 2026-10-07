@@ -20,7 +20,7 @@ import { verbose } from './verbose-logger.js';
  * message is still sent.
  *
  * Truncation order (lowest priority → cut first):
- *   memory → repo_profile → project_context → shell → non_interactive → system
+ *   memory → repo_profile → project_context → repo_map → shell → non_interactive → system
  */
 
 export const CONTEXT_BUDGET_ENV_VAR = 'SC_CONTEXT_BUDGET_TOKENS';
@@ -33,6 +33,10 @@ export const CONTEXT_SOURCE_PRIORITY: Record<string, number> = {
   memory: 10,
   repo_profile: 20,
   project_context: 30,
+  // #461 skeleton mode: the repo map IS the workspace index — cheap per
+  // byte compared to whole files, so it outlasts project_context but
+  // still yields to shell/operator notes and the system prompt.
+  repo_map: 35,
   shell: 40,
   non_interactive: 50,
   // Sandbox boundary disclosure — policy-critical, trimmed last like system.

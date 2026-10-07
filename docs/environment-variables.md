@@ -142,7 +142,7 @@ scc chat -yq 'implement issue #446'
 
 ### SC_CONTEXT_BUDGET_TOKENS
 
-Caps the estimated size of the assembled system-prompt injection — the base system prompt plus shell guide, repo profile, project context (`AGENTS.md`/`CLAUDE.md`/policy file), persistent memories, and the non-interactive note. Tokens are estimated with the shared chars/4 heuristic.
+Caps the estimated size of the assembled system-prompt injection — the base system prompt plus shell guide, repo profile, project context (`AGENTS.md`/`CLAUDE.md`/policy file), repo map (skeleton mode), persistent memories, and the non-interactive note. Tokens are estimated with the shared chars/4 heuristic.
 
 **Default:** unset (no cap; per-source spend is still accounted in the run manifest)
 
@@ -151,9 +151,10 @@ When the assembly exceeds the cap, sources are trimmed deterministically — low
 1. `memory` — persistent cross-session memories
 2. `repo_profile` — probed toolchain hints
 3. `project_context` — `AGENTS.md` / `CLAUDE.md` / policy file
-4. `shell` — shell environment guide
-5. `non_interactive` — auto-approve note (only present with `-y`)
-6. `system` — base system prompt (trimmed last, never fully dropped)
+4. `repo_map` — generated repo skeleton (only present with `context.mode=skeleton`)
+5. `shell` — shell environment guide
+6. `non_interactive` — auto-approve note (only present with `-y`)
+7. `system` — base system prompt (trimmed last, never fully dropped)
 
 A source whose full size exceeds the remaining overflow is truncated (head kept, `[... context source "X" trimmed ...]` marker appended); a source entirely covered by the overflow is dropped. Trims are never silent: a visible warning is printed, a `[CONTEXT_BUDGET]` line is emitted under `-v`, an audit event is recorded (with `--audit-log`), and the run manifest carries a `context_budget` block with `budget_tokens`, `requested_tokens`, `injected_tokens`, `over_budget`, and per-source `tokens_requested`/`tokens_injected`/`truncated`/`dropped`.
 
@@ -163,6 +164,25 @@ The manifest's `context_budget.sources` also carries a cumulative `tool_outputs`
 # Keep the injected context under ~8k estimated tokens
 export SC_CONTEXT_BUDGET_TOKENS=8000
 scc chat -yq 'implement issue #422'
+```
+
+---
+
+### SC_CONTEXT_MODE
+
+Selects how workspace knowledge is injected into the system prompt. Valid values: `full`, `skeleton`.
+
+**Default:** `full` (or `context.mode` in `.sc-agent.json` / `config.json` — env wins)
+
+- `full` — injects discovered context files (`AGENTS.md`/`SC-AGENT.md`/`CLAUDE.md` + `settings.policyFile`) verbatim as the `project_context` source.
+- `skeleton` — replaces that whole-file injection with a generated repo map: per-file exported symbols, signatures, and import edges extracted with dependency-free regex heuristics (JS/TS, Python, Go, Rust, SQL, JVM, C-family, C#, Ruby, PHP, shell, Swift, Lua — keyed by extension). The map is emitted as the `repo_map` injection source (bounded: ~60 lines/file, capped file count and total lines) and counts toward `SC_CONTEXT_BUDGET_TOKENS` like every other source. File bodies are pulled on demand via the existing `read_file` tool — the skeleton names exact workspace-relative paths. An explicitly configured `settings.policyFile` is still injected in skeleton mode.
+
+```bash
+# .sc-agent.json
+{ "context": { "mode": "skeleton" } }
+
+# or via env
+SC_CONTEXT_MODE=skeleton scc chat -yq 'refactor the provider layer'
 ```
 
 ---

@@ -21,7 +21,8 @@
 - **`src/core/failover.ts`**: Failover contract — timeout resolution, transient-error classification, backoff, SC_FAILOVER chain resolution, ProviderFailoverError
 - **`src/core/roles.ts`**: Multi-model orchestration (#424) — `planner`/`executor`/`reviewer` role routing for headless runs via `config.roles` (`provider/model` aliases), `PhaseTracker` append-only segment log, per-phase read-only policy and completion-guard suppression, `--role`/`SC_ROLE` single-phase pin; #462 adds the reviewer/judge consensus loop — `VERDICT:` marker parsing (`approve`/`request_changes`), `request_changes` → bounded executor rework (`SC_ROLE_MAX_FIXES`, default 3), one-time same-provider diversity warning, manifest `review` block
 - **`src/core/agent.ts`**: Main agent loop with parallel tool execution & memory injection
-- **`src/core/project-context.ts`**: Loads project-specific context from `AGENTS.md|CLAUDE.md`
+- **`src/core/project-context.ts`**: Loads project-specific context from `AGENTS.md|SC-AGENT.md|CLAUDE.md` (+ `settings.policyFile`)
+- **`src/core/repo-map.ts`**: Skeleton context mode (#461) — `context.mode: 'skeleton'` / `SC_CONTEXT_MODE=skeleton` injects a generated repo map (per-file symbols + import edges, ~60 lines/file cap, bounded per repo) as the `repo_map` budget source instead of whole-file `project_context`; bodies pulled on demand via `read_file`
 - **`src/core/message-validator.ts`**: Auto-corrects message sequence errors
 - **`src/core/devcontainer.ts`**: Optional `--devcontainer` execution — `devcontainer up` + `devcontainer exec` with `devcontainer_unavailable` host fallback
 - **`src/core/repo-probe/`**: Repo toolchain/command detection (`sc probe`); reports `devcontainer` + `devcontainerPath` when `.devcontainer.json`/`.devcontainer/devcontainer.json` exists
@@ -142,7 +143,7 @@
 - **Memory monitoring**: Heap usage checked every 10 iterations; warning at 80% usage
 - **Smart re-prompting**: Self-heal prompts include list of failed tools and "try a DIFFERENT approach" instructions
 - **Pagination**: `read_file` supports `offset` + `limit` for partial file reads
-- **Context budget guard**: `SC_CONTEXT_BUDGET_TOKENS` caps the assembled system-prompt injection; over-budget sources are trimmed deterministically (memory → repo_profile → project_context → shell → non_interactive → system, which is never dropped) and per-source spend lands in the run manifest `context_budget` block
+- **Context budget guard**: `SC_CONTEXT_BUDGET_TOKENS` caps the assembled system-prompt injection; over-budget sources are trimmed deterministically (memory → repo_profile → project_context → repo_map → shell → non_interactive → system, which is never dropped) and per-source spend lands in the run manifest `context_budget` block
 
 ### Phase 3 — Robusteza (Edge Cases & Hardening)
 
