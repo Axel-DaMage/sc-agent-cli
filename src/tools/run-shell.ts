@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { Tool, ToolContext } from './tool.js';
 import { requestPermission } from '../utils/permissions.js';
 import { formatSandboxViolations } from '../utils/sandbox.js';
+import { buildChildEnv, collectSecretValues, redactSecrets } from '../utils/env-scrub.js';
 
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
@@ -20,7 +21,7 @@ export const runShellTool: Tool = {
     type: 'function',
     function: {
       name: 'run_shell',
-      description: 'Execute a shell command (requires explicit permission). Git-mutating commands (checkout, restore, reset, clean, stash, add, commit, push, ...) are refused in unattended mode — use the dedicated git tool for repo state.',
+      description: 'Execute a shell command (requires explicit permission). Git-mutating commands (checkout, restore, reset, clean, stash, add, commit, push, ...) are refused in unattended mode — use the dedicated git tool for repo state. Runs with a scrubbed environment — provider credentials and other secrets are not forwarded to the child.',
       parameters: {
         type: 'object',
         properties: {
@@ -62,10 +63,19 @@ export const runShellTool: Tool = {
       throw new Error('Permission denied by user');
     }
 
+    // #471 — the child gets an allowlisted environment, never process.env:
+    // provider credentials (SC_API_KEY, OPENAI_API_KEY, GH_TOKEN, …) must not
+    // be readable via `env`/`printenv`/`/proc/self/environ`. Tool output is
+    // additionally redacted for known secret values before it reaches the
+    // model context / session history.
+    const childEnv = buildChildEnv(process.env, ctx.config.run_shell?.allowedEnvVars);
+    const secrets = collectSecretValues(process.env, ctx.config);
+    const redact = (text: string) => redactSecrets(text, secrets);
+
     // #423 — sandboxed execution. Failures preparing the sandbox fail closed:
     // the command is never silently run outside the requested boundary.
     const sandbox = ctx.sandbox?.enabled ? ctx.sandbox : undefined;
-    let spec: SpawnSpec = { file: command, argv: [], shell: true };
+    let spec: SpawnSpec = { file: command, argv: [], shell: true, env: childEnv };
     let violationMark = 0;
     if (sandbox) {
       violationMark = sandbox.violations.length;
@@ -160,18 +170,20 @@ export const runShellTool: Tool = {
           seen.add(k);
           return true;
         });
-        return formatSandboxViolations(unique);
+        // Violation targets are extracted from stderr lines — a leaked secret
+        // could ride along in one, so redact them too.
+        return redact(formatSandboxViolations(unique));
       };
 
       child.on('close', (code) => {
         clearTimeout(timer);
         const violationBlock = collectViolations();
         if (timedOut) {
-          const trunc = (stdout + stderr).substring(0, 1000);
+          const trunc = redact((stdout + stderr).substring(0, 1000));
           reject(new Error(`Command timed out after ${timeout}ms\n${trunc}${violationBlock ? `\n${violationBlock}` : ''}`));
           return;
         }
-        const output = stdout + (stderr ? `\n[stderr]\n${stderr}` : '');
+        const output = redact(stdout + (stderr ? `\n[stderr]\n${stderr}` : ''));
         if (code !== 0) {
           reject(new Error(`Command exited with code ${code}\n${output}${violationBlock ? `\n${violationBlock}` : ''}`));
         } else {
@@ -185,7 +197,7 @@ export const runShellTool: Tool = {
       child.on('error', (err) => {
         clearTimeout(timer);
         const violationBlock = collectViolations();
-        reject(new Error(`Failed to execute command: ${err.message}${violationBlock ? `\n${violationBlock}` : ''}`));
+        reject(new Error(`Failed to execute command: ${redact(err.message)}${violationBlock ? `\n${violationBlock}` : ''}`));
       });
     });
   },

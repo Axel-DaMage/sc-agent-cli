@@ -8,6 +8,34 @@ import { ensureSecureDir, warnOnLoosePermissions, writeFileSecure } from '../uti
 const CONFIG_DIR = path.join(homedir(), '.sc-agent');
 const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
+// #471 — shipped defaults for permissions.denyCommands: best-effort parity
+// with denyPaths (which only constrains the file tools). Blocks the common
+// file-dump verbs over credential material via run_shell — `cat .env`,
+// `cat *.key|*.pem`, `cat ~/.ssh/*`, reads of the agent's own config, and
+// sourcing `.env` (which re-introduces secrets into the child env). Also
+// `/proc/<pid>/environ`, which would dump the *parent* env regardless of
+// child-env scrubbing. A user's own denyCommands list replaces these —
+// keep/copy them when overriding (see docs/permission-profiles.md).
+const DEFAULT_DENY_COMMANDS: string[] = [
+  // Credential-store / dotenv file reads via the common dump verbs.
+  'cat *.env*', 'head *.env*', 'tail *.env*', 'more *.env*', 'less *.env*', 'bat *.env*',
+  'cat .env', // substring form also catches `cat .env` piped/chained further
+  'cat *.key', 'cat *.pem',
+  // SSH private keys live under ~/.ssh (glob covers ~, relative, absolute).
+  'cat *.ssh/*', 'head *.ssh/*', 'tail *.ssh/*',
+  // Other well-known credential files.
+  'cat *.netrc', 'cat *.npmrc', 'cat *.aws/credentials', 'cat *.kube/config',
+  'cat *.docker/config.json', 'cat *.pgpass', 'cat *.git-credentials',
+  'cat *id_rsa*', 'cat *id_ed25519*', 'cat *id_ecdsa*', 'cat *id_dsa*',
+  // The agent's own credential store — any verb, not just the dumpers.
+  '.sc-agent/config.json',
+  // Sourcing .env re-injects secrets into the scrubbed child environment.
+  'source *.env*', '. *.env*',
+  // /proc/<pid>/environ (incl. $PPID) bypasses child-env scrubbing entirely.
+  // Glob form (not a bare "/environ" substring) so ./environments/… stays legal.
+  '*proc*environ',
+];
+
 const DEFAULT_CONFIG: ProjectConfig = {
   model: {
     provider: 'openai-compatible',
@@ -20,6 +48,7 @@ const DEFAULT_CONFIG: ProjectConfig = {
   permissions: {
     autoApprove: ['read_file', 'list_dir', 'search_text', 'web_fetch', 'memory_read', 'code_query', 'repo_probe'],
     denyPaths: ['.env', '.env.*', '**/*.key', '**/*.pem'],
+    denyCommands: DEFAULT_DENY_COMMANDS,
   },
   profiles: {
     ollama: {
@@ -247,6 +276,21 @@ export function validateConfig(config: ProjectConfig): void {
         }
       } else if (body.includes(':') && !body.startsWith('[') && (body.match(/:/g) ?? []).length === 1) {
         throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": malformed port`);
+      }
+    }
+  }
+
+  // run_shell block (#471) — allowedEnvVars is a list of env var *names*.
+  const runShell = config.run_shell;
+  if (runShell !== undefined) {
+    if (runShell === null || typeof runShell !== 'object' || Array.isArray(runShell)) {
+      throw new Error('Invalid run_shell config: expected an object');
+    }
+    const vars = runShell.allowedEnvVars;
+    if (vars !== undefined) {
+      const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
+      if (!Array.isArray(vars) || vars.some((v) => typeof v !== 'string' || !envName.test(v))) {
+        throw new Error('Invalid run_shell.allowedEnvVars: expected an array of env var names (A-Z, 0-9, _)');
       }
     }
   }

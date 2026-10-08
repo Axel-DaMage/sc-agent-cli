@@ -76,6 +76,11 @@ Sandbox rules compose **additively** with `permissions.denyPaths` /
   (glob entries stay enforced by the file tools' `resolveSafePath`).
 - `writablePaths`/`readOnlyPaths` can widen the fs boundary but cannot un-deny
   a `denyPaths` entry.
+- The spawned command's environment is allowlist-scrubbed (#471): provider
+  credentials (`SC_API_KEY`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, …) are never
+  passed to the child — sandboxed or not. The egress-filter `*_PROXY`
+  variables are injected *after* scrubbing, so they always reach the sandboxed
+  command. `run_shell.allowedEnvVars` names operator-approved extras.
 
 ## Limits & notes
 

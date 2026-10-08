@@ -27,7 +27,12 @@ function list(name: string, items: string[]): void {
     console.log(` ${chalk.white(name.padEnd(18))} ${chalk.dim('(none)')}`);
     return;
   }
-  console.log(` ${chalk.white(name.padEnd(18))} ${items.join(', ')}`);
+  // Keep long lists on one logical line — the shipped denyCommands defaults
+  // (#471) are ~20 entries and would otherwise flood the display.
+  const MAX_SHOWN = 8;
+  const shown = items.slice(0, MAX_SHOWN).join(', ');
+  const suffix = items.length > MAX_SHOWN ? `, … +${items.length - MAX_SHOWN} more` : '';
+  console.log(` ${chalk.white(name.padEnd(18))} ${shown}${suffix}`);
 }
 
 export async function showConfig(

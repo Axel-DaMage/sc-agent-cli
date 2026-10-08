@@ -375,6 +375,35 @@ When a command is denied, the agent receives an error naming the matched rule so
 
 Typical uses: preventing pushes/merges in agent-driven workers, blocking destructive filesystem commands, and stopping shell-pipe-to-interpreter patterns.
 
+### Shipped defaults: credential-file reads (#471)
+
+The built-in config seeds `denyCommands` with patterns that block the common file-dump verbs over credential material — the shell-side counterpart of the default `denyPaths`:
+
+- `cat|head|tail|more|less|bat *.env*` and `cat .env`
+- `cat|head|tail *.ssh/*` and `cat *id_rsa* / *id_ed25519* / *id_ecdsa* / *id_dsa*`
+- `cat *.key`, `cat *.pem`
+- `cat` of `*.netrc`, `*.npmrc`, `*.aws/credentials`, `*.kube/config`, `*.docker/config.json`, `*.pgpass`, `*.git-credentials`
+- any command mentioning `.sc-agent/config.json` (the agent's own credential store)
+- `source *.env*` / `. *.env*` — sourcing re-injects secrets into the child shell env
+- `*proc*environ` — `/proc/<pid>/environ` would dump the *parent* process env regardless of child-env scrubbing
+
+Two important caveats:
+
+- **These are defaults, not built-ins.** A `denyCommands` list in your config replaces them wholesale — keep or copy these entries when you override.
+- **They are best-effort, not a boundary.** An obfuscated command, a reader that isn't listed (`sudo cat`, `python -c`, `cp`), or a differently-named secret file slips past them. The hard guarantees live in the child-environment scrub and `sandbox.*` below — deny rules are tripwires, not walls.
+
+### `run_shell` child environment (#471)
+
+Every `run_shell` command spawns with an **allowlisted environment** — never the agent's `process.env`: PATH, HOME, SHELL, TERM, USER, locale/tmp/XDG, proxy vars, and the Windows basics (SYSTEMROOT, COMSPEC, PATHEXT, …). Credential-shaped names — `SC_*`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY*`, `*_PASSWORD`, `*_AUTH`, `*_CREDENTIALS`, `BEARER` — are stripped **unconditionally**, so `env`/`printenv` inside a spawned command cannot expose provider keys.
+
+```json
+{ "run_shell": { "allowedEnvVars": ["NPM_CONFIG_REGISTRY", "CARGO_TERM_COLOR"] } }
+```
+
+`run_shell.allowedEnvVars` extends the base set **by name** — values still come from your environment, and credential-shaped names are ignored even if listed. Tool output is additionally masked for *known* secret values (credential env vars + configured API keys are replaced with `***`) before it enters the model context.
+
+> **`permissions.denyPaths` does not constrain `run_shell`.** It guards the file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `search_text`) only — the shell has no path layer. Shell-side protection is the env scrub + `denyCommands` + output redaction; enable `sandbox.*` when you need a hard filesystem boundary.
+
 ---
 
 ## Git Mutation Lock: `denyGitMutation` / `--no-commit`

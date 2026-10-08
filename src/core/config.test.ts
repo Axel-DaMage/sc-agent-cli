@@ -291,6 +291,56 @@ test('validateConfig rejects malformed context block values', async () => {
   assert.doesNotThrow(() => validateConfig(ok));
 });
 
+// --- run_shell child-env hardening (#471) -------------------------------------
+
+test('validateConfig accepts a well-formed run_shell block', () => {
+  assert.doesNotThrow(() => validateConfig(createConfig('http://localhost:11434/v1')));
+  const cfg = createConfig('http://localhost:11434/v1');
+  cfg.run_shell = { allowedEnvVars: ['NPM_CONFIG_REGISTRY', '_CUSTOM', 'X9'] };
+  assert.doesNotThrow(() => validateConfig(cfg));
+  const empty = createConfig('http://localhost:11434/v1');
+  empty.run_shell = {};
+  assert.doesNotThrow(() => validateConfig(empty));
+});
+
+test('validateConfig rejects malformed run_shell values', () => {
+  const base = () => createConfig('http://localhost:11434/v1');
+  for (const mutate of [
+    (c: ProjectConfig) => { c.run_shell = 'always' as unknown as ProjectConfig['run_shell']; },
+    (c: ProjectConfig) => { c.run_shell = [] as unknown as ProjectConfig['run_shell']; },
+    (c: ProjectConfig) => { c.run_shell = { allowedEnvVars: 'FOO' } as unknown as ProjectConfig['run_shell']; },
+    (c: ProjectConfig) => { c.run_shell = { allowedEnvVars: ['BAD-NAME'] }; },
+    (c: ProjectConfig) => { c.run_shell = { allowedEnvVars: ['9BAD'] }; },
+    (c: ProjectConfig) => { c.run_shell = { allowedEnvVars: ['HAS SPACE'] }; },
+    (c: ProjectConfig) => { c.run_shell = { allowedEnvVars: [42 as unknown as string] }; },
+  ]) {
+    const cfg = base();
+    mutate(cfg);
+    assert.throws(() => validateConfig(cfg), /run_shell/i);
+  }
+});
+
+test('loadConfig ships default denyCommands covering credential-file reads', async () => {
+  const config = await loadIsolated();
+  const deny = config.permissions?.denyCommands ?? [];
+  assert.ok(deny.length > 0, 'default config must ship denyCommands');
+  assert.ok(deny.some((p) => p.includes('.env')), 'defaults must cover .env reads');
+  assert.ok(deny.some((p) => p.includes('.ssh')), 'defaults must cover ~/.ssh reads');
+  assert.ok(deny.some((p) => p.includes('.sc-agent/config.json')), 'defaults must cover the agent config store');
+});
+
+test('loadConfig: a user denyCommands list replaces the shipped defaults', async () => {
+  const projectRoot = await createProjectWithConfig({ permissions: { denyCommands: ['git push'] } });
+  const config = await loadIsolated(projectRoot);
+  assert.deepEqual(config.permissions?.denyCommands, ['git push']);
+});
+
+test('loadConfig: run_shell.allowedEnvVars flows through deepMerge', async () => {
+  const projectRoot = await createProjectWithConfig({ run_shell: { allowedEnvVars: ['MY_FLAG'] } });
+  const config = await loadIsolated(projectRoot);
+  assert.deepEqual(config.run_shell?.allowedEnvVars, ['MY_FLAG']);
+});
+
 // --- deepMerge prototype-pollution guard (#478) -------------------------------
 
 // Raw JSON text (not JSON.stringify) so `__proto__` lands as an own

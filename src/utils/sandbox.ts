@@ -31,6 +31,7 @@ import {
   loadSeccompProfile,
   seccompSupportedOnThisHost,
 } from './sandbox-seccomp.js';
+import { buildChildEnv } from './env-scrub.js';
 import { verbose } from './verbose-logger.js';
 
 export interface SandboxViolation {
@@ -381,6 +382,7 @@ export class SandboxRuntime {
   readonly profile: SandboxProfile;
   readonly backend: SandboxBackend;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly allowedEnvVars?: string[];
   private readonly workspaceRoot: string;
   private readonly onViolation?: (v: SandboxViolation) => void;
   private readonly onNotice?: (message: string) => void;
@@ -395,6 +397,7 @@ export class SandboxRuntime {
 
   constructor(opts: SandboxRuntimeOptions) {
     this.env = opts.env ?? process.env;
+    this.allowedEnvVars = opts.config.run_shell?.allowedEnvVars;
     this.onViolation = opts.onViolation;
     this.onNotice = opts.onNotice;
     this.workspaceRoot = realpathSync(opts.workspaceRoot);
@@ -517,8 +520,11 @@ export class SandboxRuntime {
    * run the command unsandboxed.
    */
   async prepareSpawn(command: string): Promise<SandboxSpawnPlan> {
+    // #471 — sandboxed or not, the child env is allowlist-scrubbed: provider
+    // credentials must not be readable inside the spawned process either.
+    const scrubbedEnv = () => buildChildEnv(this.env, this.allowedEnvVars);
     if (!this.profile.enabled) {
-      return { file: command, argv: [], shell: true, env: this.env, execMode: 'proxy' };
+      return { file: command, argv: [], shell: true, env: scrubbedEnv(), execMode: 'proxy' };
     }
 
     const needsProxy = !this.profile.egressBlockAll || this.backend.mode === 'proxy';
@@ -532,9 +538,11 @@ export class SandboxRuntime {
         throw new Error(`sandbox egress proxy failed to start: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
       }
     }
+    // Proxy envs are appended *after* scrubbing so the egress allowlist filter
+    // always reaches the child even though *_PROXY is not a base env var.
     const env: NodeJS.ProcessEnv = proxyUrl
-      ? { ...this.env, ...this.proxyEnv(proxyUrl) }
-      : { ...this.env };
+      ? { ...scrubbedEnv(), ...this.proxyEnv(proxyUrl) }
+      : scrubbedEnv();
 
     if (this.backend.mode !== 'bwrap' || !this.backend.bwrapPath) {
       // Degraded: command runs directly but still behind the egress proxy.

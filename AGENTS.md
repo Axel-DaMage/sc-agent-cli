@@ -124,6 +124,7 @@
 - Session tracking: "Ask once" mode remembers per session
 - User can override with `-y` flag (auto-approve all)
 - **Unattended git guard**: under `-y`/`--permissions unlimited`, `run_shell` refuses git-mutating commands (`git checkout/restore/reset/clean/stash/add/commit/push/...`) — the dedicated `git` tool owns repo state; interactive mode is unaffected (#464)
+- **Child-env scrub** (#471): `run_shell`/`mcp_validate`/MCP stdio children get an allowlisted env (`utils/env-scrub.ts` — PATH/HOME/shell basics + `run_shell.allowedEnvVars` names); credential-shaped names (`SC_*`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY*`, `*_PASSWORD`, `*_AUTH`, `*_CREDENTIALS`, `BEARER`) are stripped unconditionally. `run_shell` output is redacted for known secret values (`***`). Shipped `denyCommands` defaults block `cat .env`-style credential reads — `denyPaths` does NOT constrain `run_shell` (best-effort parity; the sandbox is the hard boundary).
 - **"Always" scope cap** (#477): the permission prompt's "Always" persists to the global config only for non-mutating tools — for `run_shell`/`git`/`memory_write`/`write_file`/`edit_file` it is capped at session scope (nothing is written to `~/.sc-agent/config.json`)
 
 ### Error Recovery & Classification

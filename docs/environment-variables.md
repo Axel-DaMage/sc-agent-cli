@@ -542,6 +542,32 @@ Relocates the session-artifact root directory. `session.json`/`status.json` trac
 
 ---
 
+## Child Process Environment (#471)
+
+Commands the agent spawns (`run_shell`, `mcp_validate`, MCP stdio servers) do **not** inherit your full shell environment. They receive a fixed safe base — `PATH`, `HOME`, `SHELL`, `TERM`, `USER`, `LANG`/locale vars, `TMPDIR`/`TMP`/`TEMP`, `XDG_*` dirs, proxy vars, and the Windows essentials (`SYSTEMROOT`, `COMSPEC`, `PATHEXT`, `USERPROFILE`, …) — plus any names you opt in via config:
+
+```json
+{ "run_shell": { "allowedEnvVars": ["NPM_CONFIG_REGISTRY", "CARGO_TERM_COLOR"] } }
+```
+
+- Credential-shaped names — `SC_*`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY*`, `*_PASSWORD`, `*_AUTH`, `*_CREDENTIALS`, `BEARER` — are stripped **unconditionally**. `allowedEnvVars` can never re-add them, so `env`/`printenv` inside a spawned command cannot expose provider keys.
+- MCP servers (`mcp.servers.*`) receive the same scrubbed base plus whatever you wire explicitly into that server's `env` map — set server credentials there.
+- `run_shell` output is additionally masked for *known* secret values (credential env vars + configured API keys are replaced with `***`) before it reaches the model context.
+- `permissions.denyPaths` only guards the file tools — it does **not** constrain shell commands. `denyCommands` ships defaults that block `cat .env`-style credential reads (see [permission-profiles.md](permission-profiles.md#hard-deny-list-denycommands)); `sandbox.enabled` is the hard boundary when you need stronger isolation (see [sandboxing.md](sandboxing.md)).
+### SC_CHECKPOINT_DIR
+
+Relocates the checkpoint root directory. Checkpoints written by `--checkpoint` land under `SC_CHECKPOINT_DIR/<sessionId>.json` instead of the default. Useful for tests and sandboxed CI runs that must not touch the host's `~/.sc-agent/`.
+
+**Default:** `~/.sc-agent/checkpoints/`
+
+### SC_SESSIONS_DIR
+
+Relocates the session-artifact root directory. `session.json`/`status.json` traces land under `SC_SESSIONS_DIR/<sessionId>/` instead of the default. Useful for tests and sandboxed CI runs.
+
+**Default:** `~/.sc-agent/sessions/`
+
+---
+
 ## Headless Output Markers
 
 These are **not** environment inputs — the CLI *emits* them so wrappers and CI can branch on run outcomes without parsing prose. In `--output-format text` they go to stdout; with `--output-format json` stdout is reserved for the run manifest, so markers move to stderr.

@@ -31,7 +31,12 @@
       "git push --force",
       "rm -rf /",
       "curl * | *sh"
-    ]
+    ],
+    "_denyCommands_note": "Custom denyCommands REPLACE the shipped defaults (#471) that block `cat .env`, `cat *.key|*.pem`, `cat ~/.ssh/*`, `.sc-agent/config.json` and `/proc/*/environ` reads — copy them from docs/permission-profiles.md when overriding."
+  },
+  "run_shell": {
+    "_comment": "#471 — spawned commands get a scrubbed env (PATH/HOME/shell basics only; credentials stripped unconditionally). allowedEnvVars passes extra VAR NAMES through; credential-shaped names are always ignored.",
+    "allowedEnvVars": ["NPM_CONFIG_REGISTRY"]
   },
   "sandbox": {
     "_comment": "Opt-in tool-call sandboxing (#423). See docs/sandboxing.md. enabled defaults to false; empty egressAllowlist blocks all non-loopback egress; denyPaths/denyCommands still apply (deny wins).",

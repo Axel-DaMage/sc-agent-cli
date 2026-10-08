@@ -93,6 +93,12 @@ Edit `denyPaths` in your config:
 }
 ```
 
+Note that `denyPaths` guards the **file tools** only — it does not constrain
+`run_shell`. Shell-side protection comes from the scrubbed child environment
+(credentials are never forwarded), shipped `denyCommands` defaults that block
+`cat .env`-style reads, and secret-value masking on tool output. See
+[permission-profiles.md](permission-profiles.md#hard-deny-list-denycommands).
+
 ### Can I use this in a CI/CD pipeline?
 
 Not recommended for interactive use in CI. But you could:

@@ -199,6 +199,8 @@ The agent has access to:
 
 - **Path validation**: All file operations are restricted to the workspace root
 - **Deny patterns**: Configured patterns (e.g., `.env`, `*.key`) are blocked
+- **Scrubbed child env**: Spawned commands (`run_shell`, MCP servers) get an allowlisted environment — provider credentials (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `SC_*`, …) never reach the child, and known secrets are masked (`***`) in shell output before it enters model context
+- **Shell deny defaults**: `permissions.denyCommands` ships with rules blocking `cat .env`-style credential reads; `denyPaths` guards the file tools only — it does not constrain `run_shell` (see `docs/permission-profiles.md`)
 - **Permission system**: Sensitive operations require explicit approval unless auto-approved
 - **Auto-approve**: Safe read-only tools are auto-approved by default
 

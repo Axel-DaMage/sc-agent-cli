@@ -24,8 +24,14 @@ Per server:
 |-------|-------------|
 | `command` | Executable to spawn (required) |
 | `args` | Arguments array |
-| `env` | Extra environment variables |
+| `env` | Extra environment variables — the only way to pass secrets to a server (see below) |
 | `timeoutMs` | Per-request timeout (default `30000`) |
+
+> **Environment note (#471):** server processes receive the scrubbed
+> allowlisted child env (PATH/HOME/shell basics), **not** the agent's
+> `process.env`. Provider credentials (`SC_API_KEY`, `*_API_KEY`, `*_TOKEN`,
+> `*_SECRET`, …) are stripped unconditionally — wire any key a server needs
+> explicitly through its `env` map.
 
 ## Behavior
 

@@ -124,6 +124,19 @@ export interface ContextConfig {
   mode?: ContextMode;
 }
 
+/**
+ * `run_shell` hardening knobs (#471).
+ *
+ * `allowedEnvVars` extends the built-in safe environment a spawned command
+ * receives (PATH, HOME, shell basics — see `utils/env-scrub.ts`). Names are
+ * env var names only (no values); credential-shaped names (`*_API_KEY`,
+ * `*_TOKEN`, `*_SECRET`, `SC_*`, …) are stripped unconditionally and can never
+ * be re-added here.
+ */
+export interface RunShellConfig {
+  allowedEnvVars?: string[];
+}
+
 export interface ProjectConfig {
   model: ModelConfig;
   permissions?: {
@@ -134,6 +147,7 @@ export interface ProjectConfig {
     profile?: PermissionProfile; // Permission behavior profile
   };
   sandbox?: SandboxConfig; // Sandboxed execution for agent-spawned shell commands (#423)
+  run_shell?: RunShellConfig; // Child-environment hardening for shell commands (#471)
   webFetch?: WebFetchConfig; // web_fetch SSRF/egress policy (#470)
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
