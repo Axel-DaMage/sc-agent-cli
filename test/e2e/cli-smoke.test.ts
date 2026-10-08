@@ -56,7 +56,7 @@ describe('offline CLI paths', () => {
     const provider = await startMockProvider(() => ({ kind: 'message', content: 'ok' }));
     cleanups.push(provider.close);
     const ws = await makeWorkspace({ baseUrl: provider.baseUrl });
-    cleanups.push(() => rm(ws, { recursive: true, force: true }));
+    cleanups.push(() => rm(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }));
 
     const result = await runCli({ args: ['doctor'], cwd: ws, env: chatEnv(ws) });
 
@@ -75,7 +75,7 @@ describe('offline CLI paths', () => {
     await provider.close(); // released ephemeral port → guaranteed ECONNREFUSED
 
     const ws = await makeWorkspace({ baseUrl: deadBaseUrl });
-    cleanups.push(() => rm(ws, { recursive: true, force: true }));
+    cleanups.push(() => rm(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }));
 
     const result = await runCli({ args: ['doctor'], cwd: ws, env: chatEnv(ws) });
 

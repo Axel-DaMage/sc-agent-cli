@@ -65,7 +65,7 @@ async function setupRun(
   const provider = await startMockProvider(Array.isArray(script) ? scriptedCompletions(script) : script);
   cleanups.push(provider.close);
   const ws = await makeWorkspace({ baseUrl: provider.baseUrl, stream: opts.stream, prompt: opts.prompt });
-  cleanups.push(() => rm(ws, { recursive: true, force: true }));
+  cleanups.push(() => rm(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }));
   return {
     ws,
     provider,
