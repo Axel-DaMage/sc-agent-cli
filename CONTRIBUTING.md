@@ -1,46 +1,150 @@
 # Contributing to SC-Agent CLI
 
-Thanks for your interest in contributing! This is a personal project, but contributions are welcome.
+Thanks for your interest in contributing! SC-Agent CLI is maintained under the
+[`os-santiago`](https://github.com/os-santiago) GitHub organization and licensed
+under Apache-2.0. Contributions of all sizes are welcome — for anything beyond a
+small fix, open an issue first so the approach can be discussed.
+
+## Prerequisites
+
+- **Node.js >= 20** (CI tests on Node 20 and 22)
+- **npm** (ships with Node)
 
 ## Getting Started
 
-1. Fork the repository
-2. Clone your fork: `git clone https://github.com/yourusername/sc-cli`
-3. Install dependencies: `npm install`
-4. Build the project: `npm run build`
+```bash
+git clone https://github.com/os-santiago/sc-agent-cli.git
+cd sc-agent-cli
+npm ci
+npm run build
+node bin/sc.js --help
+```
+
+External contributors should fork the repo and clone their fork instead:
+`git clone https://github.com/<your-username>/sc-agent-cli.git`.
 
 ## Development Workflow
 
-1. Create a feature branch: `git checkout -b feature/my-feature`
-2. Make your changes
-3. Test locally: `npm run build && node bin/sc.js`
-4. Commit with clear messages: `git commit -m "feat: add new feature"`
-5. Push and create a PR
+```bash
+git checkout -b feat/my-feature        # or fix/, docs/, refactor/, ...
+npm run dev                            # tsc --watch: recompile on save
+# ... make your changes ...
+npm run build && npm test              # the same gates CI runs
+```
 
-## Code Style
+`npm run build` and `npm test` self-bootstrap dependencies via
+`scripts/ensure-deps.mjs` — on a fresh worktree they run `npm ci` for you if
+`node_modules` is missing. `npm ci` up front is still the recommended first step.
 
-- Use TypeScript strict mode
-- Follow the existing code style (consistent indentation, naming, etc.)
-- Add type annotations where helpful for clarity
-- Handle errors gracefully with meaningful messages
+## Available Commands
+
+| Command | What it does |
+|---------|--------------|
+| `npm ci` | Clean, lockfile-pinned install (what CI uses) |
+| `npm run build` | Compile TypeScript to `dist/` (`tsc`, strict mode) |
+| `npm run dev` | `tsc --watch` — incremental rebuild while you work |
+| `npm test` | Run the full vitest suite (`vitest run`) |
+| `npm run test:watch` | Vitest in watch mode |
+| `npm run test:coverage` | Vitest with v8 coverage (thresholds in `vitest.config.ts`) |
+| `npm start` | Run the CLI from source (`node bin/sc.js`) |
+| `npx eslint .` | Lint with the flat config in `eslint.config.mjs` |
+
+There is no `npm run lint` script yet. ESLint + typescript-eslint are configured
+(`eslint.config.mjs`) and CI's security-scan workflow runs
+`npx eslint --ext .ts,.js src/ --max-warnings=0` in advisory mode, so keep new
+code lint-clean even though lint is not (yet) a hard gate.
 
 ## Testing
 
-Currently, testing is manual. To test your changes:
+Testing is **automated**, not manual. The repo ships a vitest suite (~35 test
+files) colocated with sources as `src/**/*.test.ts`. Config lives in
+`vitest.config.ts` (`environment: 'node'`, `globals: false` — import
+`describe`/`it`/`expect`/`vi` from `'vitest'` in each test file).
 
-1. Build the project: `npm run build`
-2. Run different scenarios:
-   ```bash
-   sc chat
-   # Try various commands: file operations, search, shell execution
-   ```
+### Running a subset of tests
+
+```bash
+npx vitest run src/core/config.test.ts   # a single file
+npx vitest run src/core                  # a directory
+npx vitest run -t "resolves failover"    # filter by test name
+npx vitest run --changed                 # tests related to your git changes
+npm run test:watch                       # re-runs affected tests on save
+```
+
+PRs that change behavior are expected to include or update tests, matching the
+existing `*.test.ts` conventions.
+
+### End-to-end / manual verification
+
+Unit tests don't cover live provider behavior. For real-agent verification:
+
+```bash
+npm run build
+node bin/sc.js                          # interactive session
+node bin/sc.js -yq "list files here"    # headless batch run
+node bin/sc.js doctor                   # config/provider preflight checks
+```
+
+- `scripts/test-chat.sh` — builds, then launches an interactive smoke session
+- `scripts/test-nvidia.sh` — smoke test for the NVIDIA profile (needs `NVIDIA_API_KEY`)
+- `TEST-SETUP.md` — manual environment-verification checklist (PowerShell/WSL)
+- `docs/non-interactive-mode.md` — batch-mode flags, exit codes, and run manifest
+
+Test with at least one real provider before opening a PR — Ollama is the easiest
+local option (`sc profile use ollama`).
+
+## Code Style
+
+- **TypeScript strict mode** (`tsconfig.json`), ES modules — the package is
+  `"type": "module"`. Use `node:*` imports for built-ins and include the `.js`
+  extension on relative imports.
+- **Formatting**: match the surrounding code — 2-space indent, single quotes,
+  semicolons, trailing commas.
+- **Linting**: `eslint.config.mjs` (flat config, typescript-eslint recommended).
+  Notable rules: `@typescript-eslint/no-unused-vars` errors unless prefixed with
+  `_`; `no-explicit-any` warns.
+- **Pre-commit hook**: husky + lint-staged runs
+  `vitest run --reporter=verbose --changed` on staged `*.ts` files — committing
+  TypeScript changes automatically runs the tests related to your diff.
+- Handle errors with meaningful messages; avoid `any` in new code.
+- All file operations must go through `resolveSafePath` validation.
+
+## Pull Requests
+
+- **Title**: follow [Conventional Commits](https://www.conventionalcommits.org/) —
+  `feat: ...`, `fix: ...`, `docs: ...`, `refactor: ...`, `test: ...`,
+  `chore: ...`. PRs are **squash-merged**, so the title becomes the commit
+  message on `main`.
+- **Link the issue**: put `Closes #N` (or `Fixes #N`) in the PR body so merging
+  auto-closes it. Changelog entries reference issues the same way
+  (`(Closes #N)`).
+- Keep PRs focused on a single feature or fix, and explain the *why* in the
+  description, not just the *what*.
+- Update user-facing docs (`README.md`, `docs/`, `AGENTS.md`) and add a
+  `CHANGELOG.md` entry under `Unreleased` when the change is user-visible.
+
+### What CI runs on your PR
+
+- **CI** (`ci.yml`): `npm ci` → `npm run build` → `npm test` on Node 20 and 22,
+  plus a coverage report.
+- **Security scan** (`security-scan.yml`): CodeQL, TruffleHog secret scanning,
+  `npm audit`, license compliance (GPL-licensed deps fail), and pattern scans
+  for `eval(`, WebSocket usage, base64/obfuscation, and hardcoded secrets.
+- **PR security checks** (`pr-security-checks.yml`): dependency review (GPL
+  denied), plus scans restricted to the lines your PR **adds** — hex/unicode
+  escapes (`\xNN`, `\uNNNN`), WebSockets, `FormData` uploads, and clipboard
+  access fail the check. Changes to `src/utils/permissions.ts` or
+  `src/utils/dangerous-commands.ts` get flagged for extra review.
+
+If your change legitimately needs a flagged pattern, expect to justify it in
+review — the scans are intentional.
 
 ## Adding Features
 
 ### Adding a New Tool
 
-1. Create a new file in `src/tools/`, e.g., `my-tool.ts`
-2. Implement the `Tool` interface:
+1. Create `src/tools/my-tool.ts` implementing the `Tool` interface:
+
    ```typescript
    import type { Tool, ToolContext } from './tool.js';
 
@@ -65,43 +169,37 @@ Currently, testing is manual. To test your changes:
      },
    };
    ```
-3. Add to `src/tools/registry.ts`
-4. Test thoroughly
+
+2. Register it in `ALL_TOOLS` in `src/tools/registry.ts`.
+3. If it is read-only, add it to the auto-approve list in `src/core/config.ts`;
+   mutating tools go through the permission system automatically.
+4. Add a `my-tool.test.ts` covering happy path and error cases.
 
 ### Adding a New Command
 
-1. Create `src/commands/my-command.ts`
-2. Implement your command logic
-3. Register it in `src/cli.ts`:
-   ```typescript
-   program
-     .command('my-command')
-     .description('...')
-     .action(async () => {
-       await myCommand();
-     });
-   ```
+1. Create `src/commands/my-command.ts` with the command logic.
+2. Register it in `src/cli.ts` via Commander (`program.command(...)`).
+3. Add it to tab completion in `src/utils/autocomplete.ts` and to `/help` in
+   `src/commands/chat-session.ts`.
+4. Cover parsing/registration in `src/cli.test.ts` or a colocated test file.
 
 ### Adding Support for a New Provider Type
 
-The current design supports any OpenAI-compatible API, but if you want to add a provider with a different API structure (e.g., native Anthropic Messages API), you would:
+The provider layer speaks the OpenAI-compatible API (`src/core/provider.ts`,
+with the failover contract in `src/core/failover.ts`). To add a provider with a
+different API shape (e.g. native Anthropic Messages API):
 
-1. Create a new provider class in `src/core/`, e.g., `anthropic-provider.ts`
-2. Implement the same interface as `OpenAICompatibleProvider`
-3. Update `src/core/types.ts` to include the new provider type
-4. Update `src/core/agent.ts` to instantiate the appropriate provider
-
-## Pull Request Guidelines
-
-- Keep PRs focused on a single feature/fix
-- Update documentation (README, AGENTS.md) if needed
-- Test with at least one provider (Ollama is easiest for local testing)
-- Explain the "why" in your PR description, not just the "what"
+1. Create a new provider class in `src/core/` implementing the same interface
+   as `OpenAICompatibleProvider`.
+2. Extend `src/core/types.ts` with the new provider type.
+3. Update `src/core/agent.ts` to instantiate it.
 
 ## Questions?
 
-Open an issue for discussion before starting major changes.
+[Open an issue](https://github.com/os-santiago/sc-agent-cli/issues) to discuss
+ideas before starting major changes.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the
+[Apache License 2.0](LICENSE).
