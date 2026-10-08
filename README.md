@@ -128,6 +128,7 @@ During a chat session, you can use these commands:
 - `/pre-approved-commands` - Interactive setup wizard for auto-approved tools
 - `/reload` - Reload configuration from disk (apply profile changes)
 - `/clear` - Clear conversation history
+- `/memory`, `/remember [--global] <text>` - Manage persistent memory (scoped per workspace — see [docs/memory.md](docs/memory.md))
 - `/info` - Show current model and configuration
 - `exit` or `quit` - End the session
 

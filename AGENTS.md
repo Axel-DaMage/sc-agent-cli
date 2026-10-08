@@ -48,7 +48,7 @@
 
 - **`src/utils/permissions.ts`**: Permission request system (Traditional + Blacklist profiles)
 - **`src/utils/path-security.ts`**: Path validation and sandboxing
-- **`src/utils/memory.ts`**: Persistent cross-session memory storage (JSON file in ~/.sc-agent/memory/)
+- **`src/utils/memory.ts`**: Persistent cross-session memory storage (JSON file in ~/.sc-agent/memory/), workspace-scoped tiers (#476)
 - **`src/utils/shell-env.ts`**: Shell environment auto-detection (cmd, PowerShell, Git Bash, WSL)
 - **`src/utils/dangerous-commands.ts`**: Dangerous command detection for Blacklist profile
 - **`src/utils/autocomplete.ts`**: Tab completion for commands, tools, and file paths
@@ -97,9 +97,12 @@
 ### Memory System
 
 - Memories persist across sessions in `~/.sc-agent/memory/memory.json`
-- Agent auto-loads last 10 memories into system prompt
-- Model can call `memory_read`/`memory_write` to manage context
-- User commands: `/memory`, `/memory show <key>`, `/memory forget <key>`, `/memory clear`
+- Scoped per workspace (#476): workspace identity is `sha256(realpath(workspaceRoot)).slice(0,12)`; other workspaces' entries are quarantined from every read/write path
+- Tiers: `workspace` (default — only the owning project), `global` (opt-in shared), `legacy` (pre-scoping entries — loadable, never auto-injected)
+- Agent auto-loads last 10 memories into the system prompt (workspace entries first, global fills the remainder) with `[memory:workspace]`/`[memory:global]` provenance tags
+- Unresolvable workspace root → only `global` + `legacy` tiers load; workspace-scoped writes error out
+- Model can call `memory_read`/`memory_write` (`scope` arg, `id` alias for re-filing) to manage context
+- User commands: `/memory`, `/memory show <key>`, `/memory show --all`, `/memory move <key> --to workspace|global`, `/memory forget <key>`, `/memory clear`, `/remember [--global] <text>` — see `docs/memory.md`
 - Default tags for categorization
 
 ### Shell Environment Auto-Detection

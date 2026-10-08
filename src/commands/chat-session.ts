@@ -957,6 +957,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.white('  /checkpoint                    ') + chalk.gray('- Save/list/resume execution checkpoints'));
       console.log(chalk.white('  /clear                         ') + chalk.gray('- Clear conversation history'));
       console.log(chalk.white('  /memory                        ') + chalk.gray('- View/manage persistent memory'));
+      console.log(chalk.white('  /remember [--global] <text>    ') + chalk.gray('- Save a quick memory (workspace or global scope)'));
       console.log(chalk.white('  /config                        ') + chalk.gray('- Show full configuration details'));
       console.log(chalk.white('  /probe                         ') + chalk.gray('- Auto-detect repo toolchain, package manager, and commands'));
       console.log(chalk.white('  /hud                           ') + chalk.gray('- Toggle compact status bar'));
@@ -1327,38 +1328,84 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         const subcommand = args[1]?.toLowerCase();
 
         if (subcommand === 'clear') {
-          await persistentMemory.clear();
-          console.log(chalk.green('\n✓ All persistent memories cleared\n'));
+          await persistentMemory.clear(options.workspaceRoot);
+          console.log(chalk.green('\n✓ All persistent memories cleared (workspace, global, and legacy)\n'));
         } else if (subcommand === 'forget' && args[2]) {
           const key = args.slice(2).join(' ');
-          const removed = await persistentMemory.forget(key);
+          const removed = await persistentMemory.forget(key, options.workspaceRoot);
           if (removed) {
             console.log(chalk.green(`\n✓ Forgotten memory: "${key}"\n`));
           } else {
             console.log(chalk.yellow(`\n⚠ No memory found with key: "${key}"\n`));
           }
+        } else if (subcommand === 'move') {
+          // /memory move <key> --to workspace|global — re-file between scopes (#476)
+          const toIdx = args.findIndex(a => a === '--to');
+          const target = toIdx >= 0 ? args[toIdx + 1]?.toLowerCase() : undefined;
+          const key = (toIdx >= 0 ? args.slice(2, toIdx) : args.slice(2)).join(' ');
+          if (!key || (target !== 'workspace' && target !== 'global')) {
+            console.log(chalk.yellow('\n⚠ Usage: /memory move <key> --to workspace|global\n'));
+          } else {
+            const moved = await persistentMemory.move(key, target, options.workspaceRoot);
+            console.log(chalk.green(`\n✓ Moved memory "${moved.key}" → ${moved.scope} scope\n`));
+          }
+        } else if (subcommand === 'show' && (args[2]?.toLowerCase() === '--all' || args[2]?.toLowerCase() === '-a')) {
+          // Include quarantined legacy entries (pre-scoping memories) (#476)
+          const summary = await persistentMemory.getSummary(options.workspaceRoot, { all: true });
+          console.log(chalk.cyan(`\n${summary}\n`));
         } else if (subcommand === 'show' && args[2]) {
           const key = args.slice(2).join(' ');
-          const content = await persistentMemory.recall(key);
-          if (content) {
-            console.log(chalk.cyan(`\n📝 Memory: ${key}\n`));
-            console.log(chalk.gray(content));
+          const entry = await persistentMemory.recallEntry(key, options.workspaceRoot);
+          if (entry) {
+            console.log(chalk.cyan(`\n📝 Memory: ${entry.key} [${entry.scope}]\n`));
+            console.log(chalk.gray(entry.content));
             console.log();
           } else {
             console.log(chalk.yellow(`\n⚠ No memory found with key: "${key}"\n`));
           }
         } else {
-          // Show summary
-          const summary = await persistentMemory.getSummary();
+          // Show summary (workspace + global tiers; legacy stays hidden)
+          const summary = await persistentMemory.getSummary(options.workspaceRoot);
           console.log(chalk.cyan(`\n${summary}\n`));
 
           if (summary !== 'No stored memories.') {
             console.log(chalk.gray('Commands:'));
-            console.log(chalk.gray('  /memory show <key>   - View a specific memory'));
-            console.log(chalk.gray('  /memory forget <key> - Remove a memory'));
-            console.log(chalk.gray('  /memory clear        - Remove all memories'));
+            console.log(chalk.gray('  /memory show <key>                      - View a specific memory'));
+            console.log(chalk.gray('  /memory show --all                      - Include legacy (pre-scoping) memories'));
+            console.log(chalk.gray('  /memory move <key> --to workspace|global - Re-file a memory between scopes'));
+            console.log(chalk.gray('  /memory forget <key>                    - Remove a memory'));
+            console.log(chalk.gray('  /memory clear                           - Remove all memories'));
+            console.log(chalk.gray('  /remember [--global] <text>             - Save a quick memory'));
             console.log();
           }
+        }
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.red(`\n✗ Error: ${errorMsg}\n`));
+      }
+      continue;
+    }
+
+    // Handle /remember command — quick save to persistent memory (#476).
+    // `/remember <text>` stores in the workspace tier; `--global` opts in to
+    // the cross-workspace tier.
+    if (userInput.toLowerCase().startsWith('/remember')) {
+      try {
+        const tokens = userInput.trim().slice('/remember'.length).trim().split(/\s+/).filter(Boolean);
+        const globalIdx = tokens.findIndex(t => t === '--global' || t === '-g');
+        const scope = globalIdx >= 0 ? 'global' : 'workspace';
+        if (globalIdx >= 0) tokens.splice(globalIdx, 1);
+        const text = tokens.join(' ');
+        if (!text) {
+          console.log(chalk.yellow('\n⚠ Usage: /remember [--global] <text>\n'));
+        } else {
+          const base = `note-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+          let key = base;
+          for (let n = 2; await persistentMemory.recallEntry(key, options.workspaceRoot); n++) {
+            key = `${base}-${n}`;
+          }
+          await persistentMemory.remember(key, text, [], { scope, workspaceRoot: options.workspaceRoot });
+          console.log(chalk.green(`\n✓ Saved to ${scope} memory: "${key}"\n`));
         }
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1931,7 +1978,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
 
       // HUD: compact status line with configurable fields
       if (hudEnabled && !isQuiet) {
-        const mem = await persistentMemory.getAll();
+        const mem = await persistentMemory.getAll({ workspaceRoot: options.workspaceRoot });
         const storage = checkStorageLimit(join(homedir(), '.sc-agent'));
         const permIcon = currentPermissionMode === 'unlimited' ? '∞' : currentPermissionMode === 'always_ask' ? '🔔' : '✓';
         const profileIcon = currentConfig.permissions?.profile === 'blacklist' ? '🛡️' : '🔒';

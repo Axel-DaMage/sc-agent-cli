@@ -78,6 +78,8 @@ NEW TOOLS AVAILABLE:
 MEMORY SYSTEM (Cross-Session):
 - Use memory_read to recall information from previous sessions
 - Use memory_write to save important context, user preferences, project rules
+- Memories are scoped per workspace by default — they never leak into other projects. Pass scope:"global" only for truly cross-workspace facts
+- Injected memories carry a provenance tag: [memory:workspace] (this project) or [memory:global] (shared)
 - Memory persists across restarts - use it to build long-term understanding
 - Save key facts like: user's name, preferred languages, project architecture decisions
 
@@ -1113,7 +1115,7 @@ export class Agent {
 
       // #472: injected sources feed the provider context too — persisted
       // memory entries and repo docs can carry committed secrets.
-      const memoryContext = redactSecrets(await persistentMemory.getContextString());
+      const memoryContext = redactSecrets(await persistentMemory.getContextString(this.options.workspaceRoot));
 
       // Detect shell environment for cross-platform adaptation
       const shellInfo = detectShell();
