@@ -7,7 +7,8 @@ small fix, open an issue first so the approach can be discussed.
 
 ## Prerequisites
 
-- **Node.js >= 20** (CI tests on Node 20 and 22)
+- **Node.js >= 20** — the dev version is pinned in `.nvmrc` (Node 22, matching
+  the devcontainer image); CI tests on Node 20, 22, 24, and 26
 - **npm** (ships with Node)
 
 ## Getting Started
@@ -22,6 +23,15 @@ node bin/sc.js --help
 
 External contributors should fork the repo and clone their fork instead:
 `git clone https://github.com/<your-username>/sc-agent-cli.git`.
+
+### Devcontainer (optional)
+
+The repo dogfoods its own `--devcontainer` support (#421):
+`.devcontainer/devcontainer.json` provides the pinned Node toolchain and, on
+create, runs `npm ci`, `npm run build`, and `npm link` so the `sc`/`scc` bins
+resolve inside the container. Use it via `devcontainer up --workspace-folder .`,
+VS Code "Reopen in Container", or run the agent itself inside it with
+`sc chat --devcontainer`.
 
 ## Development Workflow
 
@@ -120,7 +130,8 @@ local option (`sc profile use ollama`).
   `"type": "module"`. Use `node:*` imports for built-ins and include the `.js`
   extension on relative imports.
 - **Formatting**: match the surrounding code — 2-space indent, single quotes,
-  semicolons, trailing commas.
+  semicolons, trailing commas. Indentation, charset, and newline defaults are
+  pinned in `.editorconfig` (most editors honor it natively or via plugin).
 - **Linting**: `eslint.config.mjs` (flat config, typescript-eslint recommended).
   Notable rules: `@typescript-eslint/no-unused-vars` errors unless prefixed with
   `_`; `no-explicit-any` warns.
@@ -146,8 +157,8 @@ local option (`sc profile use ollama`).
 
 ### What CI runs on your PR
 
-- **CI** (`ci.yml`): `npm ci` → `npm run build` → `npm test` on Node 20 and 22,
-  plus a coverage report.
+- **CI** (`ci.yml`): `npm ci` → `npm run build` → `npm test` on Ubuntu Node
+  20/22/24/26 plus Windows and macOS on Node 22, plus a coverage report.
 - **Security scan** (`security-scan.yml`): CodeQL, TruffleHog secret scanning,
   `npm audit`, license compliance (GPL-licensed deps fail), and pattern scans
   for `eval(`, WebSocket usage, base64/obfuscation, and hardcoded secrets.

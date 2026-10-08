@@ -1,0 +1,33 @@
+// Devcontainer for sc-agent-cli development (#502) — dogfoods the product's
+// own `--devcontainer` execution path (#421): `sc chat --devcontainer`
+// re-enters `scc chat` inside this container, so the postCreateCommand leaves
+// the freshly built `sc`/`scc` bins linked on PATH.
+{
+  "name": "sc-agent-cli",
+  // Node major must stay in sync with `.nvmrc` (guarded by src/devx.test.ts).
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  // The image's `node` user owns the npm global prefix — `npm link` works
+  // without sudo and bind-mounted workspace files aren't created root-owned.
+  "remoteUser": "node",
+  // --ignore-scripts: the `prepare` (husky) hook needs a working `.git`, which
+  // can dangle when a git worktree is bind-mounted into the container. Hooks
+  // still install when committing from the host.
+  "postCreateCommand": "npm ci --ignore-scripts && npm run build && npm link --ignore-scripts",
+  // Forward the provider config env vars so `scc chat` inside the container
+  // resolves the same model as the host (`~/.sc-agent/config.json` lives on
+  // the host and is not mounted).
+  "remoteEnv": {
+    "SC_API_KEY": "${localEnv:SC_API_KEY}",
+    "SC_BASE_URL": "${localEnv:SC_BASE_URL}",
+    "SC_MODEL": "${localEnv:SC_MODEL}",
+    "SC_PROFILE": "${localEnv:SC_PROFILE}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "EditorConfig.EditorConfig",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

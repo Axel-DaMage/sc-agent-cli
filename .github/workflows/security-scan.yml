@@ -100,15 +100,19 @@ jobs:
           echo "Scan scope: ${SCOPE_DESC}"
           scan_grep() { echo "${SCAN_INPUT}" | grep -n -E "$1"; }
 
-          # Check for tracking/telemetry code
-          if scan_grep "(track|analytics|telemetry|phone.?home)"; then
+          # Check for tracking/telemetry code. Concrete telemetry/beacon
+          # indicators only — bare `track` matched `token-tracker`,
+          # `untracked` and `track()` socket bookkeeping.
+          if scan_grep "(analytics|telemetry|phone.?home|sendBeacon|tracking.?pixel|mixpanel|amplitude|posthog|matomo|gtag|google.?analytics|hotjar|fullstory|sentry)"; then
             echo "⚠️  WARNING: Potential tracking code detected"
-            scan_grep "(track|analytics|telemetry|phone.?home)"
             exit 1
           fi
 
-          # Check for data exfiltration patterns
-          if scan_grep "\\b(fetch|axios|request|http\.get|http\.post).*http(s)?://" | grep -v "api.openai.com" | grep -v "integrate.api.nvidia.com" | grep -v "api.anthropic.com"; then
+          # Check for data exfiltration patterns. Word boundaries keep
+          # substring false positives out (requestPermission, 'web_fetch',
+          # fetchByUrl); real fetch/axios/request/http.get/http.post calls
+          # with a URL literal still match.
+          if scan_grep "\\b(fetch|axios|request|http\.get|http\.post)\\b.*http(s)?://" | grep -v "api.openai.com" | grep -v "integrate.api.nvidia.com" | grep -v "api.anthropic.com"; then
             echo "⚠️  WARNING: Suspicious HTTP requests detected"
             exit 1
           fi
