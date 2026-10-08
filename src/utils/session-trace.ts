@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Message } from '../core/types.js';
 import { redactDeep } from './secret-redaction.js';
+import { ensureSecureDirSync, writeFileSecureSync } from './secure-fs.js';
 
 /**
  * Session artifacts — ~/.sc-agent/sessions/<sessionId>/{session,status}.json.
@@ -17,10 +18,8 @@ function sessionsRoot(): string {
 export function writeSessionTrace(sessionId: string, msgs: Message[]): void {
   try {
     const sessionDir = join(sessionsRoot(), sessionId);
-    if (!existsSync(sessionDir)) {
-      mkdirSync(sessionDir, { recursive: true });
-    }
-    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(redactDeep(msgs), null, 2));
+    ensureSecureDirSync(sessionDir);
+    writeFileSecureSync(join(sessionDir, 'session.json'), JSON.stringify(redactDeep(msgs), null, 2));
   } catch {
     // Silent: logging is best-effort
   }
@@ -29,10 +28,8 @@ export function writeSessionTrace(sessionId: string, msgs: Message[]): void {
 export function writeSessionStatus(sessionId: string, statusData: Record<string, unknown>): void {
   try {
     const sessionDir = join(sessionsRoot(), sessionId);
-    if (!existsSync(sessionDir)) {
-      mkdirSync(sessionDir, { recursive: true });
-    }
-    writeFileSync(join(sessionDir, 'status.json'), JSON.stringify(redactDeep(statusData), null, 2));
+    ensureSecureDirSync(sessionDir);
+    writeFileSecureSync(join(sessionDir, 'status.json'), JSON.stringify(redactDeep(statusData), null, 2));
   } catch {
     // Silent: best-effort
   }

@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, test } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, statSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -76,6 +76,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const key of ENV_KEYS) {
     if (savedEnv[key] === undefined) delete process.env[key];
     else process.env[key] = savedEnv[key];
@@ -147,6 +148,52 @@ test('loadConfig: env overrides take precedence over the active profile', async 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+// --- file permissions (#475) -------------------------------------------------
+// Skip on Windows: POSIX mode bits are synthesized there and cannot be
+// tightened by chmod.
+const posix = test.skipIf(process.platform === 'win32');
+
+posix('loadConfig warns on and repairs a loose global config.json', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sc-agent-global-'));
+  const configPath = path.join(dir, 'config.json');
+  await writeFile(configPath, JSON.stringify({ model: { model: 'file-model' } }), 'utf-8');
+  chmodSync(configPath, 0o644);
+
+  const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const config = await loadConfig(undefined, { globalConfigPath: configPath });
+
+  assert.equal(config.model.model, 'file-model');
+  assert.equal(statSync(configPath).mode & 0o777, 0o600, 'loose config must be repaired to 0600');
+  assert.ok(
+    spy.mock.calls.some((c) => /loose permissions/.test(String(c[0]))),
+    'expected a loose-permissions warning'
+  );
+});
+
+posix('loadConfig stays silent when the global config is already owner-only', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sc-agent-global-'));
+  const configPath = path.join(dir, 'config.json');
+  await writeFile(configPath, JSON.stringify({}), { mode: 0o600 });
+
+  const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  await loadConfig(undefined, { globalConfigPath: configPath });
+
+  assert.equal(spy.mock.calls.length, 0);
+  assert.equal(statSync(configPath).mode & 0o777, 0o600);
+});
+
+posix('loadConfig does not warn for the project config layer', async () => {
+  const projectRoot = mkdtempSync(path.join(tmpdir(), 'sc-agent-project-'));
+  const projectConfigPath = path.join(projectRoot, '.sc-agent.json');
+  await writeFile(projectConfigPath, JSON.stringify({ model: { model: 'p' } }), 'utf-8');
+  chmodSync(projectConfigPath, 0o644);
+
+  const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  await loadConfig(projectRoot, { globalConfigPath: null });
+
+  assert.equal(spy.mock.calls.length, 0);
+});
 
 // --- sandbox config (#423) ---------------------------------------------------
 

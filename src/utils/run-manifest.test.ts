@@ -1,6 +1,6 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildRunManifest, emitRunManifest, type RunManifestInput } from './run-manifest.js';
@@ -182,6 +182,11 @@ test('emitRunManifest writes the manifest file and stdout line', () => {
   assert.deepEqual(JSON.parse(readFileSync(outFile, 'utf-8')).session_id, 'test-session-1');
   assert.equal(written.length, 1);
   assert.deepEqual(JSON.parse(written[0]), JSON.parse(JSON.stringify(manifest)));
+
+  // #475: run manifests carry session metadata — owner-only file.
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(outFile).mode & 0o777, 0o600);
+  }
 
   rmSync(dir, { recursive: true, force: true });
 });

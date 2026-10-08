@@ -1,7 +1,8 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { ensureSecureDir, writeFileSecure } from './secure-fs.js';
 import { redactSecrets } from './secret-redaction.js';
 
 const DEFAULT_MEMORY_DIR = path.join(homedir(), '.sc-agent', 'memory');
@@ -54,7 +55,7 @@ export class PersistentMemory {
     if (this.initialized) return;
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
-      await mkdir(this.memoryDir, { recursive: true });
+      await ensureSecureDir(this.memoryDir);
       await this.load();
       this.initialized = true;
       this.initPromise = null;
@@ -71,7 +72,7 @@ export class PersistentMemory {
           // Invalid format — start fresh but keep a backup
           try {
             const backupPath = this.memoryFile + '.bak';
-            await writeFile(backupPath, data, 'utf-8');
+            await writeFileSecure(backupPath, data);
           } catch { /* backup is optional */ }
           this.store = { entries: [], created: Date.now(), updated: Date.now(), version: 1 };
           return;
@@ -98,7 +99,7 @@ export class PersistentMemory {
 
   private async save(): Promise<void> {
     this.store.updated = this.now();
-    await writeFile(this.memoryFile, JSON.stringify(this.store, null, 2), 'utf-8');
+    await writeFileSecure(this.memoryFile, JSON.stringify(this.store, null, 2));
   }
 
   async remember(key: string, content: string, tags: string[] = []): Promise<void> {

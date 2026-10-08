@@ -1,6 +1,6 @@
-import { test, beforeAll, beforeEach } from 'vitest';
+import { test, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PersistentMemory } from './memory.js';
@@ -111,4 +111,14 @@ test('getContextString returns top 10 entries sorted by recency', async () => {
   const result = await mem.getContextString();
   assert.ok(result.includes('key-14'));
   assert.ok(!result.includes('key-0'));
+});
+
+// #475: the memory store is sensitive state — file must be 0600, dir 0700.
+const posix = test.skipIf(process.platform === 'win32');
+
+posix('memory store is written with owner-only permissions', async () => {
+  const mem = new PersistentMemory(tempDir);
+  await mem.remember('private-key', 'secret content');
+  assert.equal(statSync(path.join(tempDir, 'memory.json')).mode & 0o777, 0o600);
+  assert.equal(statSync(tempDir).mode & 0o777, 0o700);
 });

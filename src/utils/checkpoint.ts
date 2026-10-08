@@ -1,8 +1,9 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import chalk from 'chalk';
 import type { Message } from '../core/types.js';
+import { ensureSecureDirSync, writeFileSecureSync } from './secure-fs.js';
 import { redactDeep } from './secret-redaction.js';
 
 // ~/.sc-agent/checkpoints/ — SC_CHECKPOINT_DIR relocates the root
@@ -23,9 +24,7 @@ export interface CheckpointData {
 }
 
 function ensureDir(): void {
-  if (!existsSync(checkpointDir())) {
-    mkdirSync(checkpointDir(), { recursive: true });
-  }
+  ensureSecureDirSync(checkpointDir());
 }
 
 export function saveCheckpoint(data: Omit<CheckpointData, 'version' | 'timestamp'>): string {
@@ -40,7 +39,7 @@ export function saveCheckpoint(data: Omit<CheckpointData, 'version' | 'timestamp
     inputHistory: redactDeep(data.inputHistory),
   };
   const filePath = join(checkpointDir(), `${data.sessionId}.json`);
-  writeFileSync(filePath, JSON.stringify(checkpoint, null, 2));
+  writeFileSecureSync(filePath, JSON.stringify(checkpoint, null, 2));
   // Auto-clean old checkpoints on each save
   cleanOldCheckpoints();
   return filePath;

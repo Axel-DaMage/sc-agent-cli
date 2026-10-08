@@ -472,6 +472,18 @@ export SC_CONFIG_PATH=/tmp/sc-agent/config.json
 scc chat
 ```
 
+### SC_CHECKPOINT_DIR
+
+Relocates the checkpoint root directory. Checkpoints written by `--checkpoint` land under `SC_CHECKPOINT_DIR/<sessionId>.json` instead of the default. Useful for tests and sandboxed CI runs that must not touch the host's `~/.sc-agent/`.
+
+**Default:** `~/.sc-agent/checkpoints/`
+
+### SC_SESSIONS_DIR
+
+Relocates the session-artifact root directory. `session.json`/`status.json` traces land under `SC_SESSIONS_DIR/<sessionId>/` instead of the default. Useful for tests and sandboxed CI runs.
+
+**Default:** `~/.sc-agent/sessions/`
+
 ---
 
 ### SC_CHECKPOINT_DIR

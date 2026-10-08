@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { RepoProfile } from './types.js';
+import { ensureSecureDirSync, writeFileSecureSync } from '../../utils/secure-fs.js';
 
 interface CacheEntry {
   profile: RepoProfile;
@@ -125,11 +126,9 @@ export function saveCachedProfile(
   // Disk cache
   try {
     const dir = getGlobalCacheDir(cacheDir);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    ensureSecureDirSync(dir);
     const cacheFile = join(dir, getCacheFileName(profile.root));
-    writeFileSync(cacheFile, JSON.stringify(entry, null, 2), 'utf-8');
+    writeFileSecureSync(cacheFile, JSON.stringify(entry, null, 2));
   } catch {
     // Non-fatal if disk write fails
   }

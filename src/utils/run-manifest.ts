@@ -1,4 +1,3 @@
-import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Message } from '../core/types.js';
 import { ProviderFailoverError, type CandidateAttempt } from '../core/failover.js';
@@ -10,6 +9,7 @@ import type { RoleTokenUsage } from './token-tracker.js';
 import type { ResolutionResult } from './resolution-detector.js';
 import type { ContextBudgetReport } from './context-budget.js';
 import { verboseError } from './verbose-logger.js';
+import { writeFileSecureSync } from './secure-fs.js';
 import { redactDeep } from './secret-redaction.js';
 
 /**
@@ -238,7 +238,7 @@ export function emitRunManifest(
   for (const outPath of options.files ?? []) {
     if (!outPath) continue;
     try {
-      writeFileSync(resolve(outPath), JSON.stringify(safe, null, 2));
+      writeFileSecureSync(resolve(outPath), JSON.stringify(safe, null, 2));
     } catch (e) {
       verboseError(`manifest write failed (${outPath}): ${e instanceof Error ? e.message : String(e)}`);
     }

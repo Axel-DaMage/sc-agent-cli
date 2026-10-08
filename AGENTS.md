@@ -57,6 +57,7 @@
 - **`src/utils/storage-guidance.ts`**: Storage usage tips
 - **`src/utils/token-tracker.ts`**: Token usage estimation and cost tracking
 - **`src/utils/checkpoint.ts`**: Execution state checkpointing for crash recovery
+- **`src/utils/secure-fs.ts`**: Owner-only persistence (#475) — `writeFileSecure[Sync]`/`appendFileSecureSync` write files 0600 (and tighten pre-existing loose files), `ensureSecureDir[Sync]` creates dirs 0700 and repairs the `~/.sc-agent` chain, `warnOnLoosePermissions` warns + repairs on load (used by `loadConfig` for the global `config.json`). POSIX-only; no-ops on Windows.
 - **`src/utils/run-manifest.ts`**: Machine-readable run manifest builder/emitter for headless batch runs (`--output-format json`, `--summary-file`, `--output-file`)
 - **`src/utils/sandbox.ts`**: Opt-in `run_shell` sandbox (#423) — `sandbox` config block, bwrap backend on Linux (mount/net namespaces, `--seccomp`), degraded egress-proxy mode elsewhere; violations surface as `[SANDBOX_VIOLATION]` tool errors + `sandbox_violation` audit events + manifest `sandbox`/`sandbox_violations` fields
 - **`src/utils/sandbox-proxy.ts`**: Loopback egress-filter proxy enforcing `sandbox.egressAllowlist` (CONNECT + HTTP forward)
