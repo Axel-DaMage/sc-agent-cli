@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -27,10 +31,50 @@ jobs:
 
       - run: npm test
 
-      - run: npx vitest run --coverage
-        continue-on-error: true
+      - run: npm run test:coverage
         env:
           CI: true
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          mkdir -p coverage
+          node scripts/coverage-summary.mjs | tee coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment coverage on PR
+        if: always() && github.event_name == 'pull_request' && matrix.node-version == 22 && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body;
+            try {
+              body = `<!-- coverage-gate -->\n### Coverage — Node ${{ matrix.node-version }}\n\n${fs.readFileSync('coverage/summary.md', 'utf8').trim()}`;
+            } catch {
+              body = '<!-- coverage-gate -->\nCoverage report unavailable — the coverage step failed before producing a summary.';
+            }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes('<!-- coverage-gate -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
 
       - uses: actions/upload-artifact@v4
         if: always()
