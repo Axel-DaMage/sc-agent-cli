@@ -103,14 +103,17 @@ test('resolveSandboxProfile empty egressAllowlist means block-all', () => {
 
 test('resolveSandboxProfile resolves workspace-relative paths', () => {
   const ws = tmpWorkspace();
+  // Resolve through real() so assertions match resolvePathList semantics on
+  // every OS: on Windows a POSIX-style rooted entry ('/var/tmp/data') becomes
+  // drive-relative ('C:\var\tmp\data'), and tmpdir() may carry 8.3 names.
   const real = (p: string) => path.resolve(realpathSync(ws), p);
   const p = resolveSandboxProfile(
     config({ enabled: true, writablePaths: ['/var/tmp/data', 'cache-dir'], readOnlyPaths: ['/usr/share/fixtures'] }),
     ws,
   );
-  assert.ok(p.writablePaths.includes('/var/tmp/data'));
+  assert.ok(p.writablePaths.includes(real('/var/tmp/data')));
   assert.ok(p.writablePaths.includes(real('cache-dir')));
-  assert.deepEqual(p.readOnlyPaths, ['/usr/share/fixtures']);
+  assert.deepEqual(p.readOnlyPaths, [real('/usr/share/fixtures')]);
 });
 
 test('resolveSandboxProfile masks literal denyPaths that exist, skips globs', () => {
@@ -167,6 +170,17 @@ test('detectSandboxBackend returns bwrap mode with cap-net-admin detection', () 
   assert.equal(b.capNetAdmin, false);
   assert.equal(calls.length, 2);
 });
+
+// #484 — exercised for real on the windows-latest/macos-latest CI legs: no
+// injected platform/probe, so the host resolver itself must degrade.
+test.skipIf(process.platform === 'linux')(
+  'detectSandboxBackend resolves the degraded proxy backend on the real non-Linux host',
+  () => {
+    const b = detectSandboxBackend();
+    assert.equal(b.mode, 'proxy');
+    assert.match(b.degradedReason ?? '', /unsupported platform/);
+  },
+);
 
 // ---------------------------------------------------------------------------
 // buildBwrapArgv
@@ -312,6 +326,35 @@ test('SandboxRuntime degraded mode injects proxy env even for block-all', async 
   assert.equal(info.degraded_reason, 'test-degraded');
   rt.dispose();
 });
+
+// #484 — end-to-end degraded coverage on non-Linux runners: no injected
+// backend, so SandboxRuntime resolves the real host path → proxy mode, the
+// operator notice fires, and spawn plans carry the egress proxy env.
+test.skipIf(process.platform === 'linux')(
+  'SandboxRuntime degrades end-to-end on the real non-Linux host',
+  async () => {
+    const ws = tmpWorkspace();
+    const notices: string[] = [];
+    const rt = new SandboxRuntime({
+      config: config({ enabled: true, egressAllowlist: ['api.example.test:443'] }),
+      workspaceRoot: ws,
+      onNotice: (m) => notices.push(m),
+    });
+    try {
+      assert.equal(rt.backend.mode, 'proxy');
+      assert.ok(notices.some((m) => m.includes('degraded')));
+      const plan = await rt.prepareSpawn('echo hi');
+      assert.equal(plan.execMode, 'proxy');
+      assert.equal(plan.shell, true);
+      assert.match(plan.env.HTTPS_PROXY ?? '', /^http:\/\/127\.0\.0\.1:\d+$/);
+      const info = rt.getRunInfo();
+      assert.equal(info.exec_mode, 'proxy');
+      assert.match(info.degraded_reason ?? '', /unsupported platform/);
+    } finally {
+      rt.dispose();
+    }
+  },
+);
 
 test('SandboxRuntime seccomp is gated to linux/x64 + bwrap', async () => {
   const ws = tmpWorkspace();

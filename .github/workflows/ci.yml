@@ -12,10 +12,25 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      # One leg must not cancel the others — a Windows-only regression should
+      # still report the Linux results.
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node-version: [20, 22]
+        include:
+          # #484 — the project claims Windows/macOS/Linux/WSL support; verify
+          # it. Non-Linux legs pin Node 22 to bound runner cost while Linux
+          # keeps the full Node 20/22 runtime matrix. The platform-relevant
+          # suite (path-security, shell-env inputs, dangerous-commands,
+          # sandbox degraded mode) runs in full — it is the unit suite.
+          - os: windows-latest
+            node-version: 22
+          - os: macos-latest
+            node-version: 22
 
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +94,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: coverage-report-${{ matrix.node-version }}
+          name: coverage-report-${{ matrix.os }}-${{ matrix.node-version }}
           path: coverage/
           retention-days: 7
