@@ -25,9 +25,9 @@ import {
   type ContextBudgetReport,
   type ContextSource,
 } from '../utils/context-budget.js';
-import { saveCheckpoint } from '../utils/checkpoint.js';
+import { saveCheckpoint as _saveCheckpoint } from '../utils/checkpoint.js';
 import { AuditLogger } from '../utils/audit-log.js';
-import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
+import { verbose, verboseApiRequest as _verboseApiRequest, verboseApiResponse as _verboseApiResponse, verboseToolCall, verboseSession, verboseError as _verboseError } from '../utils/verbose-logger.js';
 import { SandboxRuntime } from '../utils/sandbox.js';
 import type { SandboxViolation, SandboxRunInfo } from '../utils/sandbox.js';
 import { resolveThrottleConfig } from '../utils/throttle.js';

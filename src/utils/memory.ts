@@ -4,7 +4,6 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 const DEFAULT_MEMORY_DIR = path.join(homedir(), '.sc-agent', 'memory');
-const DEFAULT_MEMORY_FILE = path.join(DEFAULT_MEMORY_DIR, 'memory.json');
 const MAX_MEMORY_ENTRIES = 1000;
 
 export interface MemoryEntry {

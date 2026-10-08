@@ -85,6 +85,7 @@ export const runShellTool: Tool = {
           `[SANDBOX_VIOLATION] ${JSON.stringify({ rule: 'spawn', target: 'sandbox-setup' })}\n` +
             `Sandboxed execution unavailable: ${detail}\n` +
             `The command was NOT executed — the sandbox boundary could not be established.`,
+          { cause: err },
         );
       }
     }

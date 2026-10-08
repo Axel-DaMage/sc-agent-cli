@@ -529,7 +529,7 @@ export class SandboxRuntime {
       } catch (err) {
         const v: SandboxViolation = { rule: 'spawn', target: 'egress-proxy' };
         this.recordViolation(v);
-        throw new Error(`sandbox egress proxy failed to start: ${err instanceof Error ? err.message : String(err)}`);
+        throw new Error(`sandbox egress proxy failed to start: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
       }
     }
     const env: NodeJS.ProcessEnv = proxyUrl

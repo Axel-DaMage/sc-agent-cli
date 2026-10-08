@@ -10,31 +10,33 @@ export default tseslint.config(
   {
     files: ['**/*.ts'],
     languageOptions: {
-      ecmaVersion: 'latest',
+      ecmaVersion: 2022,
       sourceType: 'module',
-      globals: {
-        console: 'readonly',
-        process: 'readonly',
-        URL: 'readonly',
-        fetch: 'readonly',
-        TextDecoder: 'readonly',
-        URLSearchParams: 'readonly',
-        AbortSignal: 'readonly',
-        AbortController: 'readonly',
-        FormData: 'readonly',
-        Blob: 'readonly',
-        Request: 'readonly',
-        Response: 'readonly',
-        Headers: 'readonly',
-      },
       parserOptions: {
-        project: './tsconfig.json',
+        projectService: true,
       },
     },
     rules: {
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@typescript-eslint/no-explicit-any': 'warn',
       'no-console': 'off',
+      'no-control-regex': 'off',
+      'no-useless-escape': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
+      'no-useless-assignment': 'off',
+      'prefer-const': 'off',
+    },
+  },
+  {
+    files: ['examples/**/*.js'],
+    languageOptions: {
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        require: 'readonly',
+        module: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+      },
     },
   }
 );

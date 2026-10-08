@@ -214,7 +214,7 @@ const JVM: LanguageScanner = {
     // Kotlin: fun name(...) / fun Type.name(...)
     /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|private|protected|internal|open|override|suspend|inline|infix|operator|tailrec|external|abstract|final)\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w.]+\s*\.\s*)?\w+\s*\(/,
     // Java-style methods: `public static void main(String[] a) {`
-    /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private)\s+(?:(?:static|final|abstract|synchronized|native|default|strictfp)\s+)*[\w<>\[\],.?]+\s+\w+\s*\([^;]*\)\s*(?:throws\s+[\w.,\s]+)?[{;]?\s*$/,
+    /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private)\s+(?:(?:static|final|abstract|synchronized|native|default|strictfp)\s+)*[\w<>[],.?]+\s+\w+\s*\([^;]*\)\s*(?:throws\s+[\w.,\s]+)?[{;]?\s*$/,
     // Scala/Groovy: `def name(`, `val name`, `var name`
     /^\s*(?:override\s+)?(?:def|val|var)\s+\w+/,
   ],

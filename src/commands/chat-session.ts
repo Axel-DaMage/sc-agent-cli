@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('../../package.json') as { version: string };
-import { stdin as input, stdout as output } from 'node:process';
+import { stdin as input } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -395,7 +395,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   export async function startChatSession(options: AgentOptions): Promise<void> {
   let agent = new Agent(options);
   let history: Message[] = [];
-  let historyCheckpoints: Message[][] = [];
+  const historyCheckpoints: Message[][] = [];
   let currentConfig = options.config;
   let inputHistory: string[] = [];
   let currentPermissionMode: 'ask_once' | 'always_ask' | 'unlimited' = options.permissionMode || (options.autoApprove ? 'unlimited' : 'ask_once');
@@ -1144,7 +1144,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       if (cpSub === 'save') {
         try {
           const { saveCheckpoint } = await import('../utils/checkpoint.js');
-          const path = saveCheckpoint({
+          saveCheckpoint({
             sessionId,
             workspaceRoot: options.workspaceRoot,
             history,

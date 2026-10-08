@@ -237,7 +237,7 @@ export function validateConfig(config: ProjectConfig): void {
         throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": expected host or host:port`);
       }
       const portPart = /^\[[0-9a-fA-F:]+\]:(\d+)$/.exec(body)?.[1]
-        ?? (/^[^\[\]]*:(\d+)$/.test(body) ? body.slice(body.lastIndexOf(':') + 1) : undefined);
+        ?? (/^[^[\]]*:(\d+)$/.test(body) ? body.slice(body.lastIndexOf(':') + 1) : undefined);
       if (portPart !== undefined) {
         const port = Number(portPart);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {

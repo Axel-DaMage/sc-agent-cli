@@ -157,7 +157,7 @@ program
       })();
       setVerboseLevel(verboseCount as any);
 
-      let config = await loadConfig(process.cwd());
+      const config = await loadConfig(process.cwd());
 
       // If a profile option is provided, override the active profile in config
       if (options.profile) {
