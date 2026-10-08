@@ -10,6 +10,7 @@ import type { RoleTokenUsage } from './token-tracker.js';
 import type { ResolutionResult } from './resolution-detector.js';
 import type { ContextBudgetReport } from './context-budget.js';
 import { verboseError } from './verbose-logger.js';
+import { redactDeep } from './secret-redaction.js';
 
 /**
  * Terminal reason for a non-interactive (batch) run. Part of the
@@ -230,15 +231,19 @@ export function emitRunManifest(
   manifest: RunManifest,
   options: { files?: Array<string | undefined>; onStdoutFlushed?: () => void } = {},
 ): void {
+  // #472: the manifest is a persisted artifact + stdout contract — redact
+  // every string field (final_message, error, attempt traces) once here so
+  // both the file writes and the stdout line carry the masked copy.
+  const safe = redactDeep(manifest);
   for (const outPath of options.files ?? []) {
     if (!outPath) continue;
     try {
-      writeFileSync(resolve(outPath), JSON.stringify(manifest, null, 2));
+      writeFileSync(resolve(outPath), JSON.stringify(safe, null, 2));
     } catch (e) {
       verboseError(`manifest write failed (${outPath}): ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  const line = JSON.stringify(manifest) + '\n';
+  const line = JSON.stringify(safe) + '\n';
   if (options.onStdoutFlushed) {
     process.stdout.write(line, options.onStdoutFlushed);
   } else {

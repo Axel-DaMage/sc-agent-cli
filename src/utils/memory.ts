@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { redactSecrets } from './secret-redaction.js';
 
 const DEFAULT_MEMORY_DIR = path.join(homedir(), '.sc-agent', 'memory');
 const MAX_MEMORY_ENTRIES = 1000;
@@ -103,7 +104,9 @@ export class PersistentMemory {
   async remember(key: string, content: string, tags: string[] = []): Promise<void> {
     await this.init();
     const existing = this.store.entries.findIndex(e => e.key === key);
-    const entry: MemoryEntry = { key, content, timestamp: this.now(), tags };
+    // #472: memory is persisted state — the model can stash a leaked
+    // credential here, so it crosses the redaction layer on write.
+    const entry: MemoryEntry = { key, content: redactSecrets(content), timestamp: this.now(), tags };
     if (existing >= 0) {
       this.store.entries[existing] = entry;
     } else {

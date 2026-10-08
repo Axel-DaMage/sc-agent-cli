@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import type { Message, ProjectConfig, StreamDelta, AgentCallbacks } from './types.js';
+import type { Message, ProjectConfig, StreamDelta, AgentCallbacks, ToolCall } from './types.js';
 import { OpenAICompatibleProvider } from './provider.js';
 import { resolveFailoverChain } from './failover.js';
 import type { CandidateAttempt } from './failover.js';
@@ -39,6 +39,7 @@ import {
   expectsWorkspaceMutation,
   declaresNoChangesNeeded,
 } from '../utils/mutation-detector.js';
+import { redactSecrets, redactDeep, registerConfigSecrets } from '../utils/secret-redaction.js';
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant with access to tools for working with files, web, git, and executing commands.
 
@@ -708,6 +709,14 @@ export function limitMessageHistory(messages: Message[], maxMessages: number = 6
   return result;
 }
 
+// #472 secret redaction: the history copy of a tool call carries masked
+// arguments (write_file content, run_shell commands can embed secrets).
+// `response.tool_calls` stays raw — the model's args must execute verbatim;
+// only what enters `messages` (provider context, sessions, checkpoints)
+// is masked.
+function redactToolCall(call: ToolCall): ToolCall {
+  return { ...call, function: { ...call.function, arguments: redactSecrets(call.function.arguments) } };
+}
 
 export interface AgentOptions {
   workspaceRoot: string;
@@ -780,6 +789,9 @@ export class Agent {
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
+    // #472: register the run's credentials for exact-match masking before
+    // any tool output or persistence write can carry them.
+    registerConfigSecrets(options.config);
     this.provider = new OpenAICompatibleProvider(options.config.model);
     this.provider.setFailoverChain(resolveFailoverChain(options.config));
     const throttle = resolveThrottleConfig(
@@ -999,7 +1011,7 @@ export class Agent {
     this.callbacks?.onToolStart?.({
       type: 'tool_start',
       timestamp: Date.now(),
-      data: { name, args },
+      data: { name, args: redactDeep(args) },
     });
   }
 
@@ -1010,7 +1022,7 @@ export class Agent {
     this.callbacks?.onToolComplete?.({
       type: 'tool_complete',
       timestamp: Date.now(),
-      data: { name, result, duration },
+      data: { name, result: redactSecrets(result ?? ''), duration },
     });
   }
 
@@ -1021,7 +1033,7 @@ export class Agent {
     this.callbacks?.onToolError?.({
       type: 'tool_error',
       timestamp: Date.now(),
-      data: { name, error },
+      data: { name, error: redactSecrets(error) },
     });
   }
 
@@ -1039,7 +1051,9 @@ export class Agent {
   }
 
   private async runLoop(userMessage: string, history: Message[] = [], signal?: AbortSignal, phase?: AgentRunPhaseOptions): Promise<Message[]> {
-    let messages: Message[] = [...history];
+    // #472: sanitize anything crossing into the provider context — history
+    // loaded from disk may carry secrets persisted before this layer existed.
+    let messages: Message[] = redactDeep(history);
     const readOnlyPhase = phase?.readOnly ?? false;
     const suppressGuards = phase?.suppressCompletionGuards ?? false;
 
@@ -1067,15 +1081,18 @@ export class Agent {
       if (isProjectQuery) {
         if (contextMode === 'skeleton') {
           try {
-            repoMapContext = await generateRepoMap(this.options.workspaceRoot, this.options.config);
+            const generatedMap = await generateRepoMap(this.options.workspaceRoot, this.options.config);
+            repoMapContext = generatedMap ? redactSecrets(generatedMap) : generatedMap;
           } catch {
             // Non-fatal: fall back to no index rather than failing the run.
           }
-          projectContext = policyFile
+          const policyContext = policyFile
             ? await loadPolicyFile(this.options.workspaceRoot, policyFile)
             : null;
+          projectContext = policyContext ? redactSecrets(policyContext) : policyContext;
         } else {
-          projectContext = await loadProjectContext(this.options.workspaceRoot, policyFile);
+          const loadedContext = await loadProjectContext(this.options.workspaceRoot, policyFile);
+          projectContext = loadedContext ? redactSecrets(loadedContext) : loadedContext;
         }
       }
 
@@ -1088,13 +1105,15 @@ export class Agent {
       if (isProjectQuery) {
         try {
           const profile = await probeRepo(this.options.workspaceRoot);
-          repoProfileContext = `\n# Repository Profile & Toolchain\n${formatRepoProfileForPrompt(profile)}`;
+          repoProfileContext = redactSecrets(`\n# Repository Profile & Toolchain\n${formatRepoProfileForPrompt(profile)}`);
         } catch {
           // Non-fatal if probe fails
         }
       }
 
-      const memoryContext = await persistentMemory.getContextString();
+      // #472: injected sources feed the provider context too — persisted
+      // memory entries and repo docs can carry committed secrets.
+      const memoryContext = redactSecrets(await persistentMemory.getContextString());
 
       // Detect shell environment for cross-platform adaptation
       const shellInfo = detectShell();
@@ -1358,11 +1377,13 @@ export class Agent {
         } catch { /* checkpoint is best-effort */ }
       }
 
-      // Add assistant response to history
+      // Add assistant response to history (#472: masked copy — the model can
+      // echo secrets it saw in tool output into content or write_file args).
+      // `response` itself stays raw: tool_calls execute verbatim below.
       const assistantMessage: Message = {
         role: 'assistant',
-        content: response.content,
-        tool_calls: response.tool_calls,
+        content: typeof response.content === 'string' ? redactSecrets(response.content) : response.content,
+        tool_calls: response.tool_calls?.map(redactToolCall),
       };
       messages.push(assistantMessage);
 
@@ -1424,7 +1445,7 @@ export class Agent {
           const recovered = recoverHarmonyToolCalls(response.content);
           if (recovered.length > 0) {
             response.tool_calls = recovered;
-            assistantMessage.tool_calls = recovered;
+            assistantMessage.tool_calls = recovered.map(redactToolCall);
             if (!this.options.quiet) {
               this.log(chalk.yellow(`\n  │ ♻️  Recovered ${recovered.length} tool call(s) from Harmony markup in content`));
             }
@@ -1498,7 +1519,7 @@ export class Agent {
             this.emitToolError(toolName, parseError);
             this.log(chalk.gray(`  │ ${chalk.red('✗')} ${toolName}: ${parseError}`));
             this.audit?.emit({ type: 'tool_result', name: toolName, success: false, phase: 'args_parse', error: parseError.slice(0, 200) });
-            toolsUsed.push({name: toolName, success: false, error: parseError});
+            toolsUsed.push({name: toolName, success: false, error: redactSecrets(parseError)});
             return {
               role: 'tool' as const,
               content: `Error: ${parseError}`,
@@ -1515,7 +1536,7 @@ export class Agent {
             this.emitToolError(toolName, denied);
             this.log(chalk.gray(`  │ ${chalk.red('✗')} ${denied}`));
             this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, phase: 'read_only_phase', error: denied.slice(0, 200) });
-            toolsUsed.push({name: toolName, success: false, error: denied, args});
+            toolsUsed.push({name: toolName, success: false, error: redactSecrets(denied), args});
             return {
               role: 'tool' as const,
               content: `Error: ${denied}`,
@@ -1526,7 +1547,7 @@ export class Agent {
 
           const toolStartTime = Date.now();
           try {
-            verboseToolCall(toolName, args);
+            verboseToolCall(toolName, redactDeep(args));
 
             // Emit tool start event
             this.emitToolStart(toolName, args);
@@ -1543,7 +1564,7 @@ export class Agent {
               this.log(chalk.gray(`  │    ${chalk.green('✓')} ${toolName}`));
             } else {
               this.log(chalk.gray(`  │ 🔧 Using tool: ${toolName}`));
-              this.log(chalk.gray(`  │    Args: ${JSON.stringify(args)}`));
+              this.log(chalk.gray(`  │    Args: ${JSON.stringify(redactDeep(args))}`));
               this.log(chalk.gray(`  │ ${chalk.green('✓')} Tool completed`));
             }
 
@@ -1563,7 +1584,7 @@ export class Agent {
             this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, duration_ms: Date.now() - toolStartTime, error: errorMsg.slice(0, 200) });
 
             this.log(chalk.gray(`  │ ${errorIcon} ${toolName} failed: ${errorMsg}`));
-            toolsUsed.push({name: toolName, success: false, error: errorMsg, args});
+            toolsUsed.push({name: toolName, success: false, error: redactSecrets(errorMsg), args});
 
             // Enrich error with contextual analysis so the LLM can respond intelligently
             const enhanced = enhanceError(toolName, errorMsg, this.shellInfo.type);
@@ -1603,12 +1624,15 @@ export class Agent {
 
         // Push all results to messages — and account tool-output context
         // spend (#422): raw vs post-compression estimated tokens.
+        // #472: every tool result crosses the shared redaction layer before
+        // entering history — this is the boundary that keeps secrets out of
+        // the provider context, sessions, checkpoints, and manifests.
         let toolOutRequested = 0;
         let toolOutInjected = 0;
         for (let i = 0; i < toolResults.length; i++) {
           const result = toolResults[i];
           toolOutRequested += estimateTokens(result.content);
-          result.content = compressResult(result.content);
+          result.content = compressResult(redactSecrets(result.content));
           if (i === toolResults.length - 1 && hasToolCallsWithoutContent) {
             // Append the nudge/instruction directly to the last tool result content.
             // This maintains the strict API role sequence (user -> assistant -> tool -> assistant)

@@ -27,6 +27,8 @@ import { verbose, verboseSession, verboseError } from '../utils/verbose-logger.j
 import { getWorkspaceGitState, detectSessionMutations, countMutatingToolCalls } from '../utils/mutation-detector.js';
 import { buildRunManifest, emitRunManifest, type RunExitReason } from '../utils/run-manifest.js';
 import { detectSessionResolution } from '../utils/resolution-detector.js';
+import { redactDeep, registerConfigSecrets } from '../utils/secret-redaction.js';
+import { writeSessionTrace, writeSessionStatus } from '../utils/session-trace.js';
 import { resolveRolePipeline, resolveMaxRoleFixes, runRolePipeline } from '../core/roles.js';
 import type { ReviewerDecision } from '../core/roles.js';
 
@@ -397,6 +399,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   let history: Message[] = [];
   const historyCheckpoints: Message[][] = [];
   let currentConfig = options.config;
+  // #472: session persistence helpers below run before/without the agent —
+  // register the run's credentials up front for exact-match masking.
+  registerConfigSecrets(currentConfig);
   let inputHistory: string[] = [];
   let currentPermissionMode: 'ask_once' | 'always_ask' | 'unlimited' = options.permissionMode || (options.autoApprove ? 'unlimited' : 'ask_once');
     const settings = resolveSettings(currentConfig);
@@ -434,17 +439,11 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   verbose(`Profile: ${currentConfig.activeProfile || 'default'} (${currentConfig.model.model})`);
   verbose(`Mode: ${options.initialPrompt ? 'batch' : 'interactive'}, Permissions: ${currentPermissionMode}`);
 
-  // Helper to persist session trace to the unique instance directory
+  // Helper to persist session trace to the unique instance directory.
+  // Write path lives in utils/session-trace.ts — every message crosses the
+  // shared redaction layer (#472) before hitting disk.
   function saveSessionTrace(msgs: Message[]) {
-    try {
-      const sessionDir = join(homedir(), '.sc-agent', 'sessions', sessionId);
-      if (!existsSync(sessionDir)) {
-        mkdirSync(sessionDir, { recursive: true });
-      }
-      writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(msgs, null, 2));
-    } catch {
-      // Silent: logging is best-effort
-    }
+    writeSessionTrace(sessionId, msgs);
   }
 
   // Mutation detection is delegated to mutation-detector.ts: per-tool-call
@@ -453,25 +452,17 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
 
   // Helper to write machine-readable status for automation
   function saveSessionStatus(status: string, error?: string, historyMsgs?: Message[]) {
-    try {
-      const sessionDir = join(homedir(), '.sc-agent', 'sessions', sessionId);
-      if (!existsSync(sessionDir)) {
-        mkdirSync(sessionDir, { recursive: true });
-      }
-      const hasChanges = historyMsgs ? countMutatingToolCalls(historyMsgs) > 0 : false;
-      const statusData: Record<string, unknown> = {
-        status,
-        timestamp: new Date().toISOString(),
-        session_id: sessionId,
-        changes: hasChanges,
-        model: currentConfig.model.model,
-        provider: currentConfig.model.provider,
-      };
-      if (error) statusData.error = error;
-      writeFileSync(join(sessionDir, 'status.json'), JSON.stringify(statusData, null, 2));
-    } catch {
-      // Silent: best-effort
-    }
+    const hasChanges = historyMsgs ? countMutatingToolCalls(historyMsgs) > 0 : false;
+    const statusData: Record<string, unknown> = {
+      status,
+      timestamp: new Date().toISOString(),
+      session_id: sessionId,
+      changes: hasChanges,
+      model: currentConfig.model.model,
+      provider: currentConfig.model.provider,
+    };
+    if (error) statusData.error = error;
+    writeSessionStatus(sessionId, statusData);
   }
 
   // Load persisted conversation + input history for this workspace
@@ -1008,8 +999,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       try {
         const dir = dirname(historyPaths.conv);
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-        writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+        writeFileSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+        writeFileSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
         saveSessionTrace(history);
       } catch {
         console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist history to disk\n'));
@@ -1036,8 +1027,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       try {
         const dir = dirname(historyPaths.conv);
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-        writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+        writeFileSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+        writeFileSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
         saveSessionTrace(history);
       } catch {
         console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist history to disk\n'));
@@ -1064,8 +1055,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
             model: currentConfig.model.model,
             provider: currentConfig.model.baseUrl,
             profile: currentConfig.activeProfile || 'default',
-            history,
-            inputHistory,
+            history: redactDeep(history),
+            inputHistory: redactDeep(inputHistory),
           };
           writeFileSync(exportPath, JSON.stringify(payload, null, 2));
           console.log(chalk.green(`\n✓ Session exported to ${exportPath} (${history.length} messages)\n`));
@@ -1097,8 +1088,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           try {
             const dir = dirname(historyPaths.conv);
             if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-            writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-            writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+            writeFileSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+            writeFileSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
             saveSessionTrace(history);
           } catch {
             console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist history to disk\n'));
@@ -1946,8 +1937,8 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       try {
         const dir = dirname(historyPaths.conv);
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-        writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+        writeFileSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+        writeFileSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
         saveSessionTrace(history);
       } catch {
         console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist conversation history\n'));
