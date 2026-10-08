@@ -40,7 +40,7 @@
 - Execution tools:
   - `run-shell.ts`: Execute shell commands (requires permission)
 - **New in v0.4.0**:
-  - `web-fetch.ts`: Fetch web content (docs, APIs, GitHub). No API key needed. (auto-approved)
+  - `web-fetch.ts`: Fetch web content (docs, APIs, GitHub). No API key needed. SSRF-guarded (#470): http(s)-only, private/loopback/link-local/reserved IPs blocked on every redirect hop via `src/utils/ssrf-guard.ts` (DNS-resolved addresses checked too), 5 MiB streamed body cap, 60s timeout clamp, optional `webFetch.allowlist`/`allowPrivateHosts`/`maxBytes` config. (auto-approved)
   - `git-tool.ts`: Native git operations (status, diff, log, branch, add, commit) (requires permission)
   - `memory-tools.ts`: Persistent cross-session memory read/write (read auto-approved, write requires permission)
 

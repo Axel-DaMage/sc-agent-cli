@@ -138,6 +138,19 @@ export async function showConfig(
     field('Deny rules', 'permissions.denyPaths/denyCommands still apply (deny wins)', chalk.gray);
   }
 
+  // ── web_fetch egress policy (#470) ──
+  section('web_fetch');
+  const webFetch = config.webFetch;
+  const allowlist = webFetch?.allowlist ?? [];
+  if (webFetch?.allowPrivateHosts) {
+    field('Destinations', 'unrestricted (private hosts allowed)', chalk.yellow);
+  } else {
+    field('Destinations', 'public only (private/loopback/link-local blocked)', chalk.gray);
+  }
+  field('Allowlist', allowlist.length > 0 ? allowlist.join(', ') : '(none — all public hosts)',
+    allowlist.length > 0 ? chalk.cyan : chalk.gray);
+  field('Body cap', `${((webFetch?.maxBytes ?? 5 * 1024 * 1024) / 1024 / 1024).toFixed(1)} MB`, chalk.gray);
+
   // ── Context injection (#461) ──
   section('Context');
   const ctxMode = config.context?.mode ?? 'full';

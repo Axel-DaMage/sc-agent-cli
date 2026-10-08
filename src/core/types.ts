@@ -74,6 +74,27 @@ export interface SandboxConfig {
 }
 
 /**
+ * `web_fetch` egress policy (#470).
+ *
+ * - `allowlist`: optional `host` | `host:port` | `*.domain[:port]` | `*`
+ *   entries (same syntax as `sandbox.egressAllowlist`). When non-empty,
+ *   every request — and every redirect hop — must match an entry. The list
+ *   only narrows; the private-range block still applies on top unless
+ *   `allowPrivateHosts` is set.
+ * - `allowPrivateHosts`: disables the loopback/private/link-local/reserved
+ *   destination block. Explicit escape hatch for local development
+ *   (e.g. fetching a dev server). Default false.
+ * - `maxBytes`: response body cap in bytes. Bodies are streamed and cut off
+ *   at this limit instead of being buffered whole. Default 5 MiB, clamped
+ *   to 1 KiB–64 MiB.
+ */
+export interface WebFetchConfig {
+  allowlist?: string[];
+  allowPrivateHosts?: boolean;
+  maxBytes?: number;
+}
+
+/**
  * Multi-model orchestration roles (#424). Each role maps to a
  * "provider/model" token resolved with the SC_FAILOVER alias semantics
  * (profile name → known provider → model id on the configured endpoint).
@@ -113,6 +134,7 @@ export interface ProjectConfig {
     profile?: PermissionProfile; // Permission behavior profile
   };
   sandbox?: SandboxConfig; // Sandboxed execution for agent-spawned shell commands (#423)
+  webFetch?: WebFetchConfig; // web_fetch SSRF/egress policy (#470)
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
   /**

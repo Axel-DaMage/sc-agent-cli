@@ -44,5 +44,11 @@
   "context": {
     "_comment": "Context injection mode (#461): 'full' (default) injects AGENTS.md/CLAUDE.md verbatim; 'skeleton' injects a generated repo map instead — the agent pulls file bodies via read_file. SC_CONTEXT_MODE env overrides this.",
     "mode": "full"
+  },
+  "webFetch": {
+    "_comment": "web_fetch egress policy (#470): http(s)-only, private/loopback/link-local/reserved destinations blocked on every redirect hop. allowlist (same syntax as sandbox.egressAllowlist) restricts fetchable host[:port] — empty means public internet only. allowPrivateHosts is the explicit escape hatch for local dev. maxBytes caps streamed bodies (default 5242880).",
+    "allowlist": [],
+    "allowPrivateHosts": false,
+    "maxBytes": 5242880
   }
 }

@@ -260,6 +260,49 @@ export function validateConfig(config: ProjectConfig): void {
       throw new Error(`Invalid context.mode: "${context.mode}" (expected 'full' or 'skeleton')`);
     }
   }
+
+  // web_fetch egress policy (#470). Entries share the sandbox.egressAllowlist
+  // grammar (host | host:port | [v6][:port] | *.domain[:port] | *); matching
+  // semantics are enforced at fetch time.
+  const webFetch = config.webFetch;
+  if (webFetch !== undefined) {
+    if (webFetch === null || typeof webFetch !== 'object' || Array.isArray(webFetch)) {
+      throw new Error('Invalid webFetch config: expected an object');
+    }
+    if (webFetch.allowPrivateHosts !== undefined && typeof webFetch.allowPrivateHosts !== 'boolean') {
+      throw new Error('Invalid webFetch.allowPrivateHosts: expected a boolean');
+    }
+    if (webFetch.maxBytes !== undefined) {
+      if (
+        typeof webFetch.maxBytes !== 'number' ||
+        !Number.isFinite(webFetch.maxBytes) ||
+        webFetch.maxBytes < 1024
+      ) {
+        throw new Error('Invalid webFetch.maxBytes: expected a number >= 1024 (bytes)');
+      }
+    }
+    if (webFetch.allowlist !== undefined) {
+      if (!Array.isArray(webFetch.allowlist) || webFetch.allowlist.some((e) => typeof e !== 'string' || !e.trim())) {
+        throw new Error('Invalid webFetch.allowlist: expected an array of non-empty strings');
+      }
+      for (const entry of webFetch.allowlist) {
+        const body = entry.trim();
+        if (/[\s/@]/.test(body)) {
+          throw new Error(`Invalid webFetch.allowlist entry "${entry}": expected host or host:port`);
+        }
+        const portPart = /^\[[0-9a-fA-F:]+\]:(\d+)$/.exec(body)?.[1]
+          ?? (/^[^\[\]]*:(\d+)$/.test(body) ? body.slice(body.lastIndexOf(':') + 1) : undefined);
+        if (portPart !== undefined) {
+          const port = Number(portPart);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            throw new Error(`Invalid webFetch.allowlist entry "${entry}": port must be 1-65535`);
+          }
+        } else if (body.includes(':') && !body.startsWith('[') && (body.match(/:/g) ?? []).length === 1) {
+          throw new Error(`Invalid webFetch.allowlist entry "${entry}": malformed port`);
+        }
+      }
+    }
+  }
 }
 
 /**
