@@ -242,7 +242,7 @@ sc-agent profile use my-custom
 
 ## Notes
 
-- Uses native `fetch` (Node 18+), no external HTTP library needed
+- Uses native `fetch` (Node 20+), no external HTTP library needed
 - Streaming is done via `ReadableStream` (Web Streams API)
 - Cross-platform shell execution uses `spawn({ shell: true })`
 - No external AI SDK dependencies (direct API calls)

@@ -8,6 +8,9 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     coverage: {
       provider: 'v8',
+      // Emit the coverage report even when tests fail — a red suite must not
+      // silently swallow the coverage output (#509).
+      reportOnFailure: true,
       reporter: ['text', 'json-summary', 'lcov', 'html'],
       include: ['src/**/*.ts'],
       exclude: [

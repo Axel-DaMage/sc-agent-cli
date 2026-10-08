@@ -20,11 +20,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node-version: [20, 22]
+        # engines claims >=20.0.0 — CI covers every released major in that
+        # range on Linux (20/22 maintenance LTS, 24 active LTS, 26 current).
+        # (#509)
+        node-version: [20, 22, 24, 26]
         include:
           # #484 — the project claims Windows/macOS/Linux/WSL support; verify
           # it. Non-Linux legs pin Node 22 to bound runner cost while Linux
-          # keeps the full Node 20/22 runtime matrix. The platform-relevant
+          # keeps the full Node 20/22/24/26 runtime matrix. The platform-relevant
           # suite (path-security, shell-env inputs, dangerous-commands,
           # sandbox degraded mode) runs in full — it is the unit suite.
           - os: windows-latest

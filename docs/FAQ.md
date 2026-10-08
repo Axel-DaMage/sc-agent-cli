@@ -28,7 +28,7 @@ Use Claude Code if you want a complete product. Use SC-Agent CLI if you want con
 
 ### What Node version do I need?
 
-Node.js >= 18.0.0 (for native `fetch` support).
+Node.js >= 20.0.0. CI tests the suite on Node 20, 22, 24, and 26 (`engines` in `package.json` sets the floor).
 
 Check with:
 

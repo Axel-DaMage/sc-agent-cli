@@ -193,7 +193,7 @@ DEFAULT_CONFIG (in-memory)
 - **Standardization**: Well-documented, stable API format
 - **Tooling**: Existing libraries and tools work out of the box
 
-### Why Node 18+?
+### Why Node 20+?
 
 - **Native fetch**: No need for `node-fetch` or `axios`
 - **Web Streams**: Standard `ReadableStream` for SSE parsing
@@ -333,4 +333,4 @@ Options:
 - [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
 - [Ollama OpenAI Compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md)
 - [Commander.js Documentation](https://github.com/tj/commander.js)
-- [Node.js Fetch API](https://nodejs.org/dist/latest-v18.x/docs/api/globals.html#fetch)
+- [Node.js Fetch API](https://nodejs.org/dist/latest-v20.x/docs/api/globals.html#fetch)

@@ -62,6 +62,12 @@ files) colocated with sources as `src/**/*.test.ts`. Config lives in
 `vitest.config.ts` (`environment: 'node'`, `globals: false` — import
 `describe`/`it`/`expect`/`vi` from `'vitest'` in each test file).
 
+Run the automated suite with `npm test` (vitest). CLI-level tests in
+`src/cli.test.ts` build `dist/` automatically when missing, but `npm run build`
+first is the recommended workflow.
+
+For manual smoke testing:
+
 ### Running a subset of tests
 
 ```bash
