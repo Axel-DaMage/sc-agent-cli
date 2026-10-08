@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import type { ProjectConfig } from '../core/types.js';
+import { getGlobalConfigPath } from '../core/config.js';
 import { getTerminalWidth } from './box-drawing.js';
 import { formatBytes } from './storage-limit.js';
 import { checkStorageLimit } from './storage-limit.js';
@@ -185,7 +186,7 @@ export async function showConfig(
 
   // ── Config files ──
   section('Config Files');
-  console.log(` ${chalk.gray('  Global:  ~/.sc-agent/config.json')}`);
+  console.log(` ${chalk.gray(`  Global:  ${getGlobalConfigPath()}`)}`);
   console.log(` ${chalk.gray('  Project: .sc-agent.json (if exists)')}`);
   console.log(` ${chalk.gray('  Memory:  ~/.sc-agent/memory/memory.json')}`);
 

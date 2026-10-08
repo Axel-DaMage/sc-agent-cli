@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { loadConfig, validateConfig } from './config.js';
+import { getGlobalConfigPath, initConfig, loadConfig, saveConfig, validateConfig } from './config.js';
 import type { ProjectConfig } from './types.js';
 
 function createConfig(baseUrl: string, apiKey?: string): ProjectConfig {
@@ -66,7 +67,7 @@ test('loadConfig surfaces invalid project config JSON with file path and recover
   );
 });
 
-const ENV_KEYS = ['SC_BASE_URL', 'SC_MODEL', 'SC_PROFILE', 'SC_API_KEY', 'SC_SANDBOX', 'SC_CONTEXT_MODE'] as const;
+const ENV_KEYS = ['SC_BASE_URL', 'SC_MODEL', 'SC_PROFILE', 'SC_API_KEY', 'SC_SANDBOX', 'SC_CONTEXT_MODE', 'SC_POLICY_FILE', 'SC_CONFIG_PATH'] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -241,4 +242,53 @@ test('validateConfig rejects malformed context block values', async () => {
   const ok = base();
   ok.context = { mode: 'skeleton' };
   assert.doesNotThrow(() => validateConfig(ok));
+});
+
+// --- SC_CONFIG_PATH relocation (#499) -----------------------------------------
+
+test('getGlobalConfigPath honors SC_CONFIG_PATH; blank/unset falls back to the default', () => {
+  const override = path.join(tmpdir(), 'sc-agent-relocated-config.json');
+  process.env.SC_CONFIG_PATH = override;
+  assert.equal(getGlobalConfigPath(), override);
+
+  process.env.SC_CONFIG_PATH = '   ';
+  assert.equal(
+    getGlobalConfigPath(),
+    path.join(homedir(), '.sc-agent', 'config.json'),
+    'blank SC_CONFIG_PATH must fall back to the default global config path'
+  );
+});
+
+test('loadConfig + saveConfig honor SC_CONFIG_PATH for the global layer', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sc-agent-config-path-'));
+  const envConfigPath = path.join(dir, 'relocated', 'config.json');
+  process.env.SC_CONFIG_PATH = envConfigPath;
+
+  // Write path: saveConfig creates the relocated file (and missing parent dirs).
+  await saveConfig(createConfig('http://env-global.example/v1'), true);
+  const written = JSON.parse(await readFile(envConfigPath, 'utf-8')) as ProjectConfig;
+  assert.equal(written.model.baseUrl, 'http://env-global.example/v1');
+
+  // Read path: loadConfig merges the env-relocated file as the global layer.
+  const projectRoot = await createProjectWithConfig({ model: { model: 'project-model' } });
+  const loaded = await loadConfig(projectRoot);
+  assert.equal(loaded.model.baseUrl, 'http://env-global.example/v1');
+  assert.equal(loaded.model.model, 'project-model');
+
+  // An explicit globalConfigPath option still wins over the env override.
+  const isolated = await loadConfig(projectRoot, { globalConfigPath: null });
+  assert.equal(isolated.model.baseUrl, 'http://localhost:11434/v1');
+});
+
+test('initConfig writes defaults to the SC_CONFIG_PATH location and guards existing files', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sc-agent-config-init-'));
+  const envConfigPath = path.join(dir, 'init', 'config.json');
+  process.env.SC_CONFIG_PATH = envConfigPath;
+
+  await initConfig();
+  assert.ok(existsSync(envConfigPath), 'initConfig must write to the relocated path');
+  const written = JSON.parse(await readFile(envConfigPath, 'utf-8')) as ProjectConfig;
+  assert.equal(written.model.baseUrl, 'http://localhost:11434/v1');
+
+  await assert.rejects(() => initConfig(), /Config already exists/);
 });

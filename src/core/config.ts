@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { ProjectConfig } from './types.js';
 
 const CONFIG_DIR = path.join(homedir(), '.sc-agent');
-const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
 const DEFAULT_CONFIG: ProjectConfig = {
   model: {
@@ -88,9 +88,9 @@ export async function loadConfig(
 ): Promise<ProjectConfig> {
   let config = structuredClone(DEFAULT_CONFIG);
 
-  // Load global config
+  // Load global config (explicit option wins; otherwise SC_CONFIG_PATH/default)
   const globalConfigPath =
-    options?.globalConfigPath === undefined ? CONFIG_PATH : options.globalConfigPath;
+    options?.globalConfigPath === undefined ? getGlobalConfigPath() : options.globalConfigPath;
   if (globalConfigPath !== null) {
     config = await mergeConfigFile(config, globalConfigPath, 'global');
   }
@@ -261,32 +261,37 @@ export function validateConfig(config: ProjectConfig): void {
   }
 }
 
+/**
+ * Resolve the global config file path. `SC_CONFIG_PATH` relocates it (useful
+ * for tests, CI, and containers that must not touch the host's
+ * `~/.sc-agent/config.json`); unset or blank falls back to the default.
+ * Resolved at call time so every entry point — `loadConfig`, `saveConfig`,
+ * `config-init`, `/profile` "save as default" — honors the override.
+ */
 export function getGlobalConfigPath(): string {
-  return CONFIG_PATH;
+  const envPath = process.env.SC_CONFIG_PATH?.trim();
+  return envPath ? envPath : DEFAULT_CONFIG_PATH;
 }
 
 export async function saveConfig(config: ProjectConfig, global = true): Promise<void> {
-  const targetPath = global ? CONFIG_PATH : path.join(process.cwd(), '.sc-agent.json');
+  const targetPath = global ? getGlobalConfigPath() : path.join(process.cwd(), '.sc-agent.json');
 
   if (global) {
-    await mkdir(CONFIG_DIR, { recursive: true });
+    await mkdir(path.dirname(targetPath), { recursive: true });
   }
 
   await writeFile(targetPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
 export async function initConfig(force = false): Promise<void> {
-  // Check if config exists and don't overwrite unless force=true
+  const configPath = getGlobalConfigPath();
+  // Check if config exists and don't overwrite unless force=true.
+  // (existsSync never throws ENOENT — a plain throw inside a try/catch that
+  // filters on `code` would swallow the "already exists" guard entirely.)
   if (!force) {
-    try {
-      const fs = await import('fs');
-      if (fs.existsSync(CONFIG_PATH)) {
-        throw new Error(`Config already exists at ${CONFIG_PATH}. Use --force to overwrite.`);
-      }
-    } catch (err: unknown) {
-      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err;
-      }
+    const fs = await import('fs');
+    if (fs.existsSync(configPath)) {
+      throw new Error(`Config already exists at ${configPath}. Use --force to overwrite.`);
     }
   }
 

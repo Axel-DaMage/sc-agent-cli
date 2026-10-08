@@ -56,6 +56,46 @@ When multiple API keys are set, the priority is:
 
 ## Behavior Configuration
 
+### SC_BASE_URL
+
+Overrides `model.baseUrl` — the OpenAI-compatible endpoint the agent talks to. Wins over the active profile and both config files; the value is validated with `new URL()` at startup, so an invalid URL fails config validation with the same error as a bad config-file value.
+
+**Default:** unset (uses `model.baseUrl` from config/profile)
+
+```bash
+# Point at a different compatible endpoint without editing config
+export SC_BASE_URL="https://models.github.ai/inference"
+scc chat
+```
+
+---
+
+### SC_MODEL
+
+Overrides `model.model` — the model id sent to the provider. Wins over the active profile and both config files.
+
+**Default:** unset (uses `model.model` from config/profile)
+
+```bash
+export SC_MODEL="openai/gpt-4.1"
+scc chat
+```
+
+---
+
+### SC_PROFILE
+
+Overrides `activeProfile` — selects which entry of `profiles` is merged into `model.*`. Only applied when the named profile exists in `config.profiles`; an unknown name is ignored.
+
+**Default:** unset (uses `activeProfile` from config)
+
+```bash
+export SC_PROFILE=nvidia
+scc chat
+```
+
+---
+
 ### SC_FAILOVER
 
 Ordered csv of `provider/model` candidates forming the provider cascade. The configured model is always tried first; each `SC_FAILOVER` entry is then tried in declared order when a candidate fails persistently.
@@ -187,6 +227,19 @@ SC_CONTEXT_MODE=skeleton scc chat -yq 'refactor the provider layer'
 
 ---
 
+### SC_POLICY_FILE
+
+Overrides `settings.policyFile` — an extra policy/doctrine file injected into the `project_context` system-prompt source alongside the auto-discovered `AGENTS.md`/`SC-AGENT.md`/`CLAUDE.md` files. The path is resolved against the workspace root and must land inside it (deny-path rules still apply); unreadable or denied files are skipped silently. An explicitly set policy file is still injected when `context.mode`/`SC_CONTEXT_MODE` is `skeleton`.
+
+**Default:** unset
+
+```bash
+export SC_POLICY_FILE=docs/TEAM-RULES.md
+scc chat
+```
+
+---
+
 ### SC_MAX_ITERATIONS
 
 Controls the maximum number of agent iterations before stopping. Each iteration consists of:
@@ -305,6 +358,75 @@ Oldest files are automatically deleted to bring usage down to 90% of the limit.
 
 ---
 
+### SC_MAX_STEPS
+
+Stops the run gracefully after N tool executions. Equivalent of `--max-steps <n>`; the flag wins when both are set. Must be a positive integer — anything else is a usage error.
+
+**Default:** unset (no step cap)
+
+```bash
+SC_MAX_STEPS=25 scc chat -yq "triage issue #123"
+```
+
+On exhaustion the run ends gracefully: partial work is preserved, an `SC_BUDGET_EXCEEDED steps` marker is emitted, and the process exits with code **22** (see [Headless output markers](#headless-output-markers)).
+
+---
+
+### SC_MAX_SECONDS
+
+Stops the run gracefully after N seconds of wall-clock time. Equivalent of `--max-seconds <n>`; the flag wins when both are set. Must be a positive integer — anything else is a usage error.
+
+**Default:** unset (no time cap)
+
+```bash
+SC_MAX_SECONDS=300 scc chat -yq "update the changelog"
+```
+
+On exhaustion the run emits `SC_BUDGET_EXCEEDED seconds` and exits with code **22**.
+
+---
+
+### SC_MAX_TOTAL_TOKENS
+
+Stops the run gracefully when estimated session tokens exceed N (chars/4 heuristic, covering the whole conversation including tool outputs). Equivalent of `--max-total-tokens <n>`; the flag wins when both are set. Must be a positive integer — anything else is a usage error.
+
+**Default:** unset (no token cap)
+
+```bash
+SC_MAX_TOTAL_TOKENS=200000 scc chat -yq "refactor the provider layer"
+```
+
+On exhaustion the run emits `SC_BUDGET_EXCEEDED tokens` and exits with code **22**.
+
+---
+
+### SC_HUD
+
+Forces the interactive status bar (HUD) on or off — wins over `settings.hud` in config.
+
+**Accepted values:** `1` or `true` (case-insensitive) enables; any other set value (e.g. `0`, `false`) disables.
+
+**Default:** unset (uses `settings.hud`, which defaults to enabled)
+
+```bash
+# Run interactively without the status bar
+SC_HUD=false scc chat
+```
+
+---
+
+### SC_DEBUG_METRICS
+
+When set (any non-empty value), enables extra `[METRICS]` diagnostic lines for agent-loop decisions — context-injection loaded/skipped with sizes and mode, and self-heal activation/skip reasons. They go through the stderr verbose channel, so combine with `-v` to see them.
+
+**Default:** unset (metrics lines suppressed)
+
+```bash
+SC_DEBUG_METRICS=1 scc chat -v "implement the feature"
+```
+
+---
+
 ### SC_DEVCONTAINER_AGENT_CMD
 
 Command executed inside the devcontainer when `scc chat --devcontainer` runs the agent loop via `devcontainer exec`.
@@ -335,6 +457,9 @@ SC_SANDBOX=1 scc chat -yq 'implement issue #423'
 ```
 
 See [sandboxing.md](sandboxing.md) for the `sandbox` config block.
+
+---
+
 ### SC_CONFIG_PATH
 
 Overrides the location of the global config file. Reads (`loadConfig`) and writes (`saveConfig`, `sc config-init`, `/profile` defaults) all honor it. Useful for tests, CI, and containers that must not touch the host's `~/.sc-agent/config.json`.
@@ -346,6 +471,20 @@ Overrides the location of the global config file. Reads (`loadConfig`) and write
 export SC_CONFIG_PATH=/tmp/sc-agent/config.json
 scc chat
 ```
+
+---
+
+## Headless Output Markers
+
+These are **not** environment inputs — the CLI *emits* them so wrappers and CI can branch on run outcomes without parsing prose. In `--output-format text` they go to stdout; with `--output-format json` stdout is reserved for the run manifest, so markers move to stderr.
+
+### SC_BUDGET_EXCEEDED
+
+Emitted as `SC_BUDGET_EXCEEDED <dimension>` when an execution budget (`--max-steps`/`SC_MAX_STEPS`, `--max-seconds`/`SC_MAX_SECONDS`, `--max-total-tokens`/`SC_MAX_TOTAL_TOKENS`) ends the run gracefully — `<dimension>` is one of `steps`, `seconds`, `tokens`. Pairs with exit code **22** and `resolution: "budget_exceeded"` in the run manifest.
+
+### SC_LIVELOCK
+
+Emitted as an `[SC_LIVELOCK]`-prefixed error when the agent aborts on a tool livelock — N consecutive non-empty model responses with no tool calls (default 3 under `-y`/`--permissions unlimited`; `--livelock-threshold 0` disables). Pairs with exit code **23**.
 
 ---
 

@@ -1,8 +1,8 @@
 import prompts from 'prompts';
 import chalk from 'chalk';
 import type { ProjectConfig } from '../core/types.js';
+import { getGlobalConfigPath } from '../core/config.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { isDangerousCommand, formatDangerousWarning } from './dangerous-commands.js';
 import { boxHeader, boxFooter } from './box-drawing.js';
@@ -225,8 +225,8 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
   if (choice === 'always') {
     // Save to config permanently AND update in-memory config to avoid re-prompting
     try {
-      const configDir = path.join(homedir(), '.sc-agent');
-      const configPath = path.join(configDir, 'config.json');
+      const configPath = getGlobalConfigPath();
+      const configDir = path.dirname(configPath);
 
       if (!existsSync(configDir)) {
         mkdirSync(configDir, { recursive: true });
