@@ -436,6 +436,73 @@ test('Agent.run does not count memory_write as a workspace mutation for the guar
   memSpy.mockRestore();
 });
 
+test('Agent.run: a #464-refused run_shell git mutation does not satisfy the zero-mutation guard (#485)', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  const writeSpy = vi.spyOn(writeFileTool, 'execute').mockResolvedValue('ok');
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      // The model tries to revert files via run_shell — refused by the
+      // unattended git guard (#464) before it can touch the worktree.
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'g1',
+          type: 'function' as const,
+          function: { name: 'run_shell', arguments: JSON.stringify({ command: 'git checkout -- .' }) },
+        }],
+      };
+    }
+    if (callCount === 2) {
+      // Neutral acknowledgement prose: no future-intention phrasing (would
+      // trip self-heal instead), no no-changes verdict.
+      return { content: 'The git mutation was refused by the permission gate.' };
+    }
+    if (callCount === 3) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'w1',
+          type: 'function' as const,
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'x.ts', content: 'y' }) },
+        }],
+      };
+    }
+    return { content: 'Done.' };
+  });
+
+  const result = await agent.run('Fix the parser bug');
+
+  // The refusal surfaces as a tool-result error carrying the guard message.
+  const refused = result.find(m => m.role === 'tool' && m.tool_call_id === 'g1');
+  assert.ok(refused, 'expected a tool result for the refused run_shell call');
+  assert.match(refused!.content, /refused in unattended mode/);
+
+  // A refused call is a failure, not a mutation — the #448 guard still
+  // re-prompts once, then the write_file call satisfies it.
+  const reprompts = result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION'));
+  assert.equal(reprompts.length, 1);
+  assert.equal(writeSpy.mock.calls.length, 1);
+  assert.equal(callCount, 4);
+
+  mock.mockRestore();
+  writeSpy.mockRestore();
+});
+
 // ---------------------------------------------------------------------------
 // Multi-model orchestration (#424) — phase lifecycle
 // ---------------------------------------------------------------------------

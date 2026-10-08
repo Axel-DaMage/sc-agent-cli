@@ -75,47 +75,63 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for the base diff on pull_request
 
       - name: Scan for suspicious patterns
         run: |
           echo "🔍 Scanning for malicious patterns..."
 
+          # On PRs, scan only lines ADDED by the change — same convention as
+          # pr-security-checks.yml's backdoor-detection job. Whole-repo greps
+          # flag pre-existing legitimate identifiers (`untracked`,
+          # `token-tracker`, `track()` socket bookkeeping) on every PR.
+          # push/schedule still scan the full tree.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SCAN_INPUT=$(git diff -U0 origin/${{ github.base_ref }}...HEAD -- '*.ts' '*.js' | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*(//|\*|/\*)' || true)
+            SCOPE_DESC="added lines"
+          else
+            SCAN_INPUT=$(cat $(find src/ -name '*.ts' -o -name '*.js') 2>/dev/null || true)
+            SCOPE_DESC="full tree"
+          fi
+          echo "Scan scope: ${SCOPE_DESC}"
+          scan_grep() { echo "${SCAN_INPUT}" | grep -n -E "$1"; }
+
           # Check for tracking/telemetry code
-          if grep -r -E "(track|analytics|telemetry|phone.?home)" --include="*.ts" --include="*.js" src/; then
+          if scan_grep "(track|analytics|telemetry|phone.?home)"; then
             echo "⚠️  WARNING: Potential tracking code detected"
-            grep -r -n -E "(track|analytics|telemetry|phone.?home)" --include="*.ts" --include="*.js" src/
+            scan_grep "(track|analytics|telemetry|phone.?home)"
             exit 1
           fi
 
           # Check for data exfiltration patterns
-          if grep -r -E "(fetch|axios|request|http\.get|http\.post).*http(s)?://" --include="*.ts" --include="*.js" src/ | grep -v "api.openai.com" | grep -v "integrate.api.nvidia.com" | grep -v "api.anthropic.com"; then
+          if scan_grep "\\b(fetch|axios|request|http\.get|http\.post).*http(s)?://" | grep -v "api.openai.com" | grep -v "integrate.api.nvidia.com" | grep -v "api.anthropic.com"; then
             echo "⚠️  WARNING: Suspicious HTTP requests detected"
-            grep -r -n -E "(fetch|axios|request|http\.get|http\.post).*http(s)?://" --include="*.ts" --include="*.js" src/ | grep -v "api.openai.com" | grep -v "integrate.api.nvidia.com" | grep -v "api.anthropic.com"
             exit 1
           fi
 
           # Check for base64 encoded strings (potential obfuscation)
-          if grep -r -E "atob|btoa|Buffer\.from.*base64" --include="*.ts" --include="*.js" src/; then
+          if scan_grep "atob|btoa|Buffer\.from.*base64"; then
             echo "⚠️  WARNING: Base64 encoding/decoding detected (potential obfuscation)"
-            grep -r -n -E "atob|btoa|Buffer\.from.*base64" --include="*.ts" --include="*.js" src/
+            scan_grep "atob|btoa|Buffer\.from.*base64"
             exit 1
           fi
 
           # Check for eval() usage
-          if grep -r -E "eval\(" --include="*.ts" --include="*.js" src/; then
+          if scan_grep "eval\("; then
             echo "⚠️  WARNING: eval() usage detected (security risk)"
-            grep -r -n -E "eval\(" --include="*.ts" --include="*.js" src/
+            scan_grep "eval\("
             exit 1
           fi
 
           # Check for credential harvesting patterns
-          if grep -r -E "(password|token|secret|key|credential).*=.*process\.env" --include="*.ts" --include="*.js" src/ | grep -E "(send|post|fetch|upload)"; then
+          if scan_grep "(password|token|secret|key|credential).*=.*process\.env" | grep -E "(send|post|fetch|upload)"; then
             echo "⚠️  WARNING: Potential credential exfiltration detected"
             exit 1
           fi
 
           # Check for crypto mining patterns
-          if grep -r -E "(crypto.?miner|coinhive|monero|bitcoin|mining.?pool)" --include="*.ts" --include="*.js" src/; then
+          if scan_grep "(crypto.?miner|coinhive|monero|bitcoin|mining.?pool)"; then
             echo "⚠️  WARNING: Cryptocurrency mining code detected"
             exit 1
           fi
