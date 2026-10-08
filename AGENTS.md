@@ -123,6 +123,7 @@
 - Session tracking: "Ask once" mode remembers per session
 - User can override with `-y` flag (auto-approve all)
 - **Unattended git guard**: under `-y`/`--permissions unlimited`, `run_shell` refuses git-mutating commands (`git checkout/restore/reset/clean/stash/add/commit/push/...`) — the dedicated `git` tool owns repo state; interactive mode is unaffected (#464)
+- **"Always" scope cap** (#477): the permission prompt's "Always" persists to the global config only for non-mutating tools — for `run_shell`/`git`/`memory_write`/`write_file`/`edit_file` it is capped at session scope (nothing is written to `~/.sc-agent/config.json`)
 
 ### Error Recovery & Classification
 

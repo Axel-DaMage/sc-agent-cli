@@ -44,10 +44,14 @@ Switch between profiles with `/profile` command.
 
 ? Allow this action?
 ❯   Yes (once)
-    Always (save to config)
+    Always (this session only)
     Session (until exit)
     No (deny)
 ```
+
+> For mutating tools (`run_shell`, `git`, `memory_write`, `write_file`,
+> `edit_file`) "Always" is capped at session scope and never saved to the
+> global config. Non-mutating tools still offer "Always (save to config)".
 
 ### When to use:
 - ✅ Learning what the agent does
