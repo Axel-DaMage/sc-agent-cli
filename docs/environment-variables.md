@@ -566,7 +566,7 @@ scc chat
 
 ## Headless Output Markers
 
-These are **not** environment inputs — the CLI *emits* them so wrappers and CI can branch on run outcomes without parsing prose. In `--output-format text` they go to stdout; with `--output-format json` stdout is reserved for the run manifest, so markers move to stderr.
+These are **not** environment inputs — the CLI *emits* them so wrappers and CI can branch on run outcomes without parsing prose. In `--output-format text` they go to stdout; with `--output-format json` stdout is reserved for the run manifest, so markers move to stderr. The exit codes they pair with are specified in [`docs/exit-codes.md`](exit-codes.md) (canonical contract).
 
 ### SC_BUDGET_EXCEEDED
 

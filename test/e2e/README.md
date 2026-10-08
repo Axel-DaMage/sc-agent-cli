@@ -24,22 +24,35 @@ test itself. No API keys, no real provider, no secrets — `SC_*` and
   reachable mock endpoint (exit 0) and a dead one (exit 1).
 - **Headless chat** — `sc chat -q --prompt-file` (file path *and* `-` for
   stdin) against the mock's `POST /v1/chat/completions`.
-- **Exit-code contract end-to-end**:
+- **Exit-code contract end-to-end** — the canonical spec is
+  [`docs/exit-codes.md`](../../docs/exit-codes.md); every row below asserts the
+  real process exit status of `bin/sc.js` (#486):
 
-  | code | scenario                                        |
-  | ---: | ----------------------------------------------- |
-  | 0    | `write_file` tool call + synthesis → success    |
-  | 10   | read-only answer → `SCC_NO_CHANGES`             |
-  | 20   | consecutive empty responses → provider error    |
-  | 21   | known-auth host with no API key (config check)  |
-  | 22   | `--max-steps 1` → `SC_BUDGET_EXCEEDED steps`    |
-  | 23   | `--livelock-threshold 1` → `[SC_LIVELOCK]`      |
-  | 24   | HTTP 401 → provider chain exhausted (failover)  |
+  | code | scenario                                              |
+  | ---: | ----------------------------------------------------- |
+  | 0    | `write_file` tool call + synthesis → success          |
+  | 0    | SSE streaming transport (`stream:true`) → success     |
+  | 1    | unreadable `--prompt-file` → generic/usage error      |
+  | 10   | read-only answer → `SCC_NO_CHANGES`                   |
+  | 10   | explicit `VERDICT: NO_CHANGES` → `SCC_NO_CHANGES`     |
+  | 11   | `VERDICT: NOT_ACTIONABLE` → `SCC_NOT_ACTIONABLE`      |
+  | 11   | `VERDICT: BLOCKED` → `SCC_BLOCKED`                    |
+  | 11   | not-actionable prose (heuristic, no marker)           |
+  | 20   | consecutive empty responses → provider error          |
+  | 21   | known-auth host with no API key (config check)        |
+  | 22   | `--max-steps 1` → `SC_BUDGET_EXCEEDED steps`          |
+  | 22   | `--max-seconds 1` + `delayMs` reply → `… seconds`     |
+  | 23   | `--livelock-threshold 1` → `[SC_LIVELOCK]`            |
+  | 24   | HTTP 401 → chain exhausted (non-retryable, 1 attempt) |
+  | 24   | HTTP 500 → retried to the 4-attempt bound → exhausted |
+  | 143  | `SIGTERM` mid-request → `interrupted` manifest (POSIX)|
 
   Note: HTTP/transport failures traverse the failover contract and surface as
-  `ProviderFailoverError` → **24**, not 20 — exit 20 is reached through
-  non-failover provider failures such as the empty-response abort. Exit 21 is
-  asserted at the config-validation boundary (deterministic, no socket).
+  `ProviderFailoverError` → **24**, not 20/21 — exit 20 is reached through
+  non-failover provider failures such as the empty-response abort, and exit 21
+  is asserted at the config-validation boundary (deterministic, no socket).
+  Exit 11 is wired in `chat-session.ts` from the resolution detector's
+  `exit_code`/`stdout_marker` (#446 verdict semantics).
 - **Batch output contracts** — last-stdout-line run manifest
   (`exit_reason`/`terminalResolution`/`attempts`), `--output-format json`
   (manifest-only stdout), `--summary-file`.
@@ -52,8 +65,11 @@ test itself. No API keys, no real provider, no secrets — `SC_*` and
   `GET /v1/models` + `POST /v1/chat/completions`; records every request
   (headers + parsed JSON body) for assertions; replies as SSE when the client
   sends `stream:true`. `scriptedCompletions([...])` scripts a reply sequence.
+  `delayMs` on a scripted reply adds artificial latency (seconds-budget and
+  signal tests).
 - `helpers/run-cli.ts` — `runCli()` (spawn wrapper returning
-  `{code, signal, stdout, stderr, timedOut}` with ANSI stripped),
+  `{code, signal, stdout, stderr, timedOut}` with ANSI stripped; `onSpawn`
+  exposes the live child for mid-run signals),
   `makeWorkspace()` (temp cwd with `.sc-agent.json` + `prompt.md`),
   `cleanEnv()`/`chatEnv()` (hermetic child environment),
   `lastManifest()` (parse the manifest off stdout).

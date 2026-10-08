@@ -353,10 +353,11 @@ sc "analyze this code"
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Error (API error, invalid prompt, etc.) |
+Batch runs terminate with the documented, machine-consumable contract in
+[`docs/exit-codes.md`](exit-codes.md) — `0` success, `1` generic error,
+`10`/`11` zero-mutation terminals, `20`–`24` failure classes, `130`/`143`
+signal exits. Wrappers should branch on `$?` alone; see the full table and
+marker contract there (section "Exit-Code Contract" below for usage).
 
 ---
 
@@ -515,22 +516,15 @@ Restores the checkpoint's conversation history and reuses its session id (checkp
 
 ## Exit-Code Contract (stable, machine-consumable)
 
-Batch runs terminate with a documented exit code — wrappers branch on `$?` alone:
+Batch runs terminate with a documented exit code — wrappers branch on `$?`
+alone. The canonical, normative contract lives in
+[`docs/exit-codes.md`](exit-codes.md): every code, its trigger paths, its
+stdout/stderr marker, and the failover nuance (HTTP failures — including a
+live `401` or `500` — surface as `24` provider-chain-exhausted, not `20`/`21`).
 
-| Code | Meaning | Marker on last stdout line |
-|------|---------|----------------------------|
-| `0`  | Success (changes produced, or interactive run) | — |
-| `1`  | Generic/unspecified error | `Error: …` |
-| `10` | Success, **zero mutations** — model refused / read-only / no tools executed | `SCC_NO_CHANGES` |
-| `20` | Provider error — network, timeout, 5xx, repeated empty responses | `Error: …` |
-| `21` | Auth error — 401/403, missing or invalid API key | `Error: …` |
-| `22` | Execution budget exhausted (`--max-steps`/`--max-seconds`/`--max-total-tokens`) | `SC_BUDGET_EXCEEDED <steps\|seconds\|tokens>` |
-| `23` | Agent-loop abort — tool livelock (`--livelock-threshold`), unrecoverable loop | `[SC_LIVELOCK] …` |
-| `24` | Provider chain exhausted — every `SC_FAILOVER` candidate failed (manifest carries `errorClass` + `attempts`) | `Error: …` |
-| `130` | Interrupted by `SIGINT` (batch only) | manifest `exit_reason: "interrupted"` |
-| `143` | Interrupted by `SIGTERM` (batch only, e.g. `timeout` kills) | manifest `exit_reason: "interrupted"` |
-
-Reserved: 2-9 clean terminals, 11-19 run outcomes, 25+ fatal. Codes are stable across releases.
+Reserved: 2-9 clean terminals, 12-19 run outcomes (`11` = not-actionable /
+blocked, `SCC_NOT_ACTIONABLE`/`SCC_BLOCKED`), 25+ fatal. Codes are stable
+across releases and asserted end-to-end by `test/e2e/chat-exit-codes.test.ts`.
 
 ```bash
 scc chat -yq --max-steps 50 'implement issue #42'

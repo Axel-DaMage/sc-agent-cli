@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { classifyError, EXIT_CODES } from './exit-codes.js';
 import { ProviderFailoverError } from '../core/failover.js';
 
+// #486: the numeric values ARE the contract — wrappers branch on $? alone.
+// Pin them so a renumbering refactor fails unit tests, not just e2e.
+test('EXIT_CODES: the documented numeric contract is pinned', () => {
+  assert.deepEqual(EXIT_CODES, {
+    SUCCESS: 0,
+    ERROR: 1,
+    NO_CHANGES: 10,
+    NOT_ACTIONABLE: 11,
+    PROVIDER_ERROR: 20,
+    AUTH_ERROR: 21,
+    BUDGET_EXCEEDED: 22,
+    LOOP_ABORT: 23,
+    PROVIDER_EXHAUSTED: 24,
+  });
+});
+
 test('classifyError: auth errors → 21', () => {
   for (const msg of [
     'Request failed with status 401',

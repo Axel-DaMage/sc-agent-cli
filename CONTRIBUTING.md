@@ -119,7 +119,8 @@ node bin/sc.js doctor                   # config/provider preflight checks
 - `scripts/test-chat.sh` — builds, then launches an interactive smoke session
 - `scripts/test-nvidia.sh` — smoke test for the NVIDIA profile (needs `NVIDIA_API_KEY`)
 - `TEST-SETUP.md` — manual environment-verification checklist (PowerShell/WSL)
-- `docs/non-interactive-mode.md` — batch-mode flags, exit codes, and run manifest
+- `docs/non-interactive-mode.md` — batch-mode flags and run manifest
+- `docs/exit-codes.md` — canonical exit-code contract (asserted by `test/e2e/chat-exit-codes.test.ts`)
 
 Test with at least one real provider before opening a PR — Ollama is the easiest
 local option (`sc profile use ollama`).

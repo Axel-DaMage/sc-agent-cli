@@ -24,8 +24,8 @@ export interface MockToolCall {
 }
 
 export type MockCompletion =
-  | { kind: 'message'; content?: string | null; toolCalls?: MockToolCall[] }
-  | { kind: 'http'; status: number; body?: unknown };
+  | { kind: 'message'; content?: string | null; toolCalls?: MockToolCall[]; delayMs?: number }
+  | { kind: 'http'; status: number; body?: unknown; delayMs?: number };
 
 export interface RecordedRequest {
   method: string;
@@ -169,6 +169,9 @@ export function startMockProvider(handler: MockHandler): Promise<MockProvider> {
   let chatCalls = 0;
 
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    // A client killed mid-request (e.g. the SIGTERM exit-code test) leaves a
+    // dead socket behind — a delayed write must not crash the mock.
+    res.on('error', () => {});
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
@@ -200,13 +203,29 @@ export function startMockProvider(handler: MockHandler): Promise<MockProvider> {
 
       if (req.method === 'POST' && url.endsWith('/chat/completions')) {
         const reply = handler(record, chatCalls++);
-        if (reply.kind === 'http') {
-          sendJson(res, reply.status, reply.body ?? { error: { message: `mock http ${reply.status}` } });
-          return;
-        }
-        const body = (json ?? {}) as { model?: unknown; stream?: unknown };
-        const model = typeof body.model === 'string' && body.model ? body.model : 'e2e-mock';
-        sendCompletion(res, model, reply, body.stream === true);
+        const respond = async () => {
+          // Optional artificial latency — used to exercise the seconds
+          // budget and to keep a request in flight for signal tests.
+          if (reply.delayMs && reply.delayMs > 0) {
+            await new Promise<void>((wait) => {
+              // unref: a never-delivered delayed reply (signal tests) must not
+              // hold the test process alive after the suite finishes.
+              const timer = setTimeout(wait, reply.delayMs);
+              timer.unref();
+            });
+          }
+          if (res.destroyed || res.writableEnded) return;
+          if (reply.kind === 'http') {
+            sendJson(res, reply.status, reply.body ?? { error: { message: `mock http ${reply.status}` } });
+            return;
+          }
+          const body = (json ?? {}) as { model?: unknown; stream?: unknown };
+          const model = typeof body.model === 'string' && body.model ? body.model : 'e2e-mock';
+          sendCompletion(res, model, reply, body.stream === true);
+        };
+        // A dead client socket (killed mid-delay) can surface here — never
+        // crash the mock on it.
+        respond().catch(() => {});
         return;
       }
 

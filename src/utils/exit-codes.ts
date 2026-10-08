@@ -1,5 +1,6 @@
 // Documented exit-code contract for headless/batch mode (#409).
 // Stable across releases — wrappers must be able to branch on $? alone.
+// Canonical spec: docs/exit-codes.md · e2e asserts: test/e2e/chat-exit-codes.test.ts
 //
 //   0  success (with or without changes before #412; =with-changes after)
 //   1  generic/unspecified error
@@ -8,10 +9,10 @@
 //   21 auth error                     (401/403, invalid or missing API key)
 //   22 budget exhausted               (SC_BUDGET_EXCEEDED,  #408)
 //   23 agent-loop abort               (tool livelock, malformed-args storm)
-//   11 completed but not actionable   (SCC_NOT_ACTIONABLE,  #446)
+//   11 completed but not actionable   (SCC_NOT_ACTIONABLE/SCC_BLOCKED, #446; wired to process exit in #486)
 //   24 provider chain exhausted       (failover contract — every candidate failed, #425)
 //
-// Reserved ranges: 2-9 other clean terminals, 11-19 run outcomes, 25+ fatal.
+// Reserved ranges: 2-9 other clean terminals, 12-19 run outcomes, 25+ fatal.
 
 export const EXIT_CODES = {
   SUCCESS: 0,

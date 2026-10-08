@@ -28,6 +28,7 @@ import { getWorkspaceGitState, detectSessionMutations, countMutatingToolCalls } 
 import { ensureSecureDirSync, writeFileSecureSync } from '../utils/secure-fs.js';
 import { buildRunManifest, emitRunManifest, type RunExitReason } from '../utils/run-manifest.js';
 import { detectSessionResolution } from '../utils/resolution-detector.js';
+import { EXIT_CODES } from '../utils/exit-codes.js';
 import { redactDeep, registerConfigSecrets } from '../utils/secret-redaction.js';
 import { writeSessionTrace, writeSessionStatus } from '../utils/session-trace.js';
 import { resolveRolePipeline, resolveMaxRoleFixes, runRolePipeline } from '../core/roles.js';
@@ -881,20 +882,30 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     if (budgetExceeded) {
       saveSessionStatus('budget_exceeded', `budget:${budgetExceeded}`, history);
       markerOut(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
-      process.exitCode = 22;
+      process.exitCode = EXIT_CODES.BUDGET_EXCEEDED;
       emitUsageSummary('budget_exceeded', `budget exceeded (${budgetExceeded})`);
       return;
     }
 
     // Zero-mutation signal: run completed but never called a mutating tool
     // (model refused, answered read-only, or only ran inspections). Emit a
-    // machine-greppable marker as the last stdout line and exit with the
-    // documented no-changes code (10) — still a clean exit, caller decides.
+    // machine-greppable marker and exit with the documented code — 11 when
+    // the terminal resolution is not_actionable/blocked (#446 verdict,
+    // wired to the process exit in #486), 10 for the generic no-changes
+    // outcome. Both are clean exits; the caller decides.
     const mutations = detectSessionMutations(history, batchGitStateBefore, getWorkspaceGitState(options.workspaceRoot));
     if (!mutations.hasMutations) {
+      const resolution = detectResolutionSafely('no_changes');
+      if (resolution && (resolution.resolution === 'not_actionable' || resolution.resolution === 'blocked')) {
+        saveSessionStatus(resolution.resolution, resolution.resolution_reason, history);
+        markerOut(resolution.stdout_marker ?? `SCC_${resolution.resolution === 'blocked' ? 'BLOCKED' : 'NOT_ACTIONABLE'}`);
+        process.exitCode = EXIT_CODES.NOT_ACTIONABLE;
+        emitUsageSummary('no_changes');
+        return;
+      }
       saveSessionStatus('no_changes', undefined, history);
       markerOut('SCC_NO_CHANGES');
-      process.exitCode = 10;
+      process.exitCode = EXIT_CODES.NO_CHANGES;
       emitUsageSummary('no_changes');
       return;
     }
