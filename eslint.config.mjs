@@ -8,7 +8,9 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['**/*.ts'],
+    // Scoped to src/: parserOptions.project only covers tsconfig's include
+    // (src/**/*), so applying it to test/ or tooling files breaks parsing.
+    files: ['src/**/*.ts'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

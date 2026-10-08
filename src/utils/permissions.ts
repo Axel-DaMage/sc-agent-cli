@@ -4,7 +4,6 @@ import type { ProjectConfig } from '../core/types.js';
 import { getGlobalConfigPath } from '../core/config.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { getGlobalConfigPath } from '../core/config.js';
 import { isDangerousCommand, formatDangerousWarning } from './dangerous-commands.js';
 import { boxHeader, boxFooter } from './box-drawing.js';
 

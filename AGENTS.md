@@ -194,6 +194,9 @@ npm run build     # Compile TypeScript
 npm run dev       # Watch mode
 npm link          # Install globally
 sc-agent          # Run the CLI
+npm test          # Unit/integration suite (vitest, src/**/*.test.ts)
+npm run test:e2e  # E2E smoke suite — spawns built bin/sc.js vs a mock provider
+                  # (test/e2e/, requires `npm run build` first; see its README)
 ```
 
 ## Common Tasks

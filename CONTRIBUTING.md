@@ -56,6 +56,7 @@ code lint-clean even though lint is not (yet) a hard gate.
 
 ## Testing
 
+
 Testing is **automated**, not manual. The repo ships a vitest suite (~35 test
 files) colocated with sources as `src/**/*.test.ts`. Config lives in
 `vitest.config.ts` (`environment: 'node'`, `globals: false` — import
@@ -73,6 +74,20 @@ npm run test:watch                       # re-runs affected tests on save
 
 PRs that change behavior are expected to include or update tests, matching the
 existing `*.test.ts` conventions.
+
+### E2E smoke suite
+
+`test/e2e/` spawns the built `bin/sc.js` — offline commands (`--version`,
+`--help`, `sc doctor`) plus headless `sc chat` runs against a mock
+OpenAI-compatible provider, asserting the documented exit codes end-to-end.
+Requires a prior build:
+
+```bash
+npm run build && npm run test:e2e
+```
+
+See [`test/e2e/README.md`](test/e2e/README.md) for how the mock provider and
+spawn helpers work.
 
 ### End-to-end / manual verification
 
@@ -138,6 +153,73 @@ local option (`sc profile use ollama`).
 
 If your change legitimately needs a flagged pattern, expect to justify it in
 review — the scans are intentional.
+
+
+## Adding Features
+
+### Adding a New Tool
+
+1. Create `src/tools/my-tool.ts` implementing the `Tool` interface:
+
+   ```typescript
+   import type { Tool, ToolContext } from './tool.js';
+
+   export const myTool: Tool = {
+     definition: {
+       type: 'function',
+       function: {
+         name: 'my_tool',
+         description: 'Description of what it does',
+         parameters: {
+           type: 'object',
+           properties: {
+             arg1: { type: 'string', description: '...' },
+           },
+           required: ['arg1'],
+         },
+       },
+     },
+     async execute(args, ctx) {
+       // Implementation
+       return 'result';
+     },
+   };
+   ```
+
+2. Register it in `ALL_TOOLS` in `src/tools/registry.ts`.
+3. If it is read-only, add it to the auto-approve list in `src/core/config.ts`;
+   mutating tools go through the permission system automatically.
+4. Add a `my-tool.test.ts` covering happy path and error cases.
+
+### Adding a New Command
+
+1. Create `src/commands/my-command.ts` with the command logic.
+2. Register it in `src/cli.ts` via Commander (`program.command(...)`).
+3. Add it to tab completion in `src/utils/autocomplete.ts` and to `/help` in
+   `src/commands/chat-session.ts`.
+4. Cover parsing/registration in `src/cli.test.ts` or a colocated test file.
+
+### Adding Support for a New Provider Type
+
+The provider layer speaks the OpenAI-compatible API (`src/core/provider.ts`,
+with the failover contract in `src/core/failover.ts`). To add a provider with a
+different API shape (e.g. native Anthropic Messages API):
+
+1. Create a new provider class in `src/core/` implementing the same interface
+   as `OpenAICompatibleProvider`.
+2. Extend `src/core/types.ts` with the new provider type.
+3. Update `src/core/agent.ts` to instantiate it.
+
+## Questions?
+
+[Open an issue](https://github.com/os-santiago/sc-agent-cli/issues) to discuss
+ideas before starting major changes.
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the
+[Apache License 2.0](LICENSE).
+
 
 ## Adding Features
 

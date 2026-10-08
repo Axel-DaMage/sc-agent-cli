@@ -46,12 +46,15 @@ jobs:
 
       - run: npm test
 
+      - run: npm run test:e2e
+
       - run: npm run test:coverage
         env:
           CI: true
 
       - name: Coverage summary
         if: always()
+        shell: bash
         run: |
           mkdir -p coverage
           node scripts/coverage-summary.mjs | tee coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
