@@ -5,13 +5,20 @@ integrations (ticket systems, internal APIs, chat notifications, etc.).
 
 ## Configuration
 
-Add a `plugins` array to `~/.sc-agent/config.json` or `.sc-agent.json`:
+Add a `plugins` array to `~/.sc-agent/config.json` (global config):
 
 ```json
 {
   "plugins": ["./tools/discord-notify.mjs", "@org/scc-tools"]
 }
 ```
+
+> **Trusted config only (#469):** `plugins` specifiers are `import()`'ed at
+> session start — arbitrary in-process code execution — so a project-scope
+> `.sc-agent.json` cannot declare them. The key is dropped with a stderr
+> warning (`ignoring project-scope privileged key "plugins"`) when it comes
+> from a file resolving inside the workspace. Keep plugin configuration in
+> the global file or an `SC_CONFIG_PATH` that resolves outside the repo.
 
 Specifiers may be:
 

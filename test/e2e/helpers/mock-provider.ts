@@ -39,7 +39,8 @@ export interface RecordedRequest {
 export type MockHandler = (req: RecordedRequest, callIndex: number) => MockCompletion;
 
 export interface MockProvider {
-  /** e.g. http://127.0.0.1:PORT/v1 — plug into SC_BASE_URL/.sc-agent.json. */
+  /** e.g. http://127.0.0.1:PORT/v1 — plug into SC_BASE_URL (a project-scope
+   *  `.sc-agent.json` `model.baseUrl` is ignored post-#469). */
   baseUrl: string;
   requests: RecordedRequest[];
   close(): Promise<void>;

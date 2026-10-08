@@ -1727,7 +1727,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
             console.log(chalk.gray(`  ${configPath}\n`));
 
             // Reload config
-            const reloadedConfig = await loadConfig(options.workspaceRoot);
+            const reloadedConfig = await loadConfig(options.workspaceRoot, { auditLog: options.auditLog });
             currentConfig = reloadedConfig;
 
             agent = new Agent({
@@ -1804,7 +1804,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         console.log(chalk.cyan('\n♻️  Reloading configuration...\n'));
 
         // Reload config from disk
-        const reloadedConfig = await loadConfig(options.workspaceRoot);
+        const reloadedConfig = await loadConfig(options.workspaceRoot, { auditLog: options.auditLog });
         currentConfig = reloadedConfig;
 
         // Override with env var if available
@@ -1862,7 +1862,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     // Handle /model command
     if (userInput.toLowerCase() === '/model') {
       try {
-        const config = await loadConfig(options.workspaceRoot);
+        const config = await loadConfig(options.workspaceRoot, { auditLog: options.auditLog });
         const profiles = config.profiles || {};
         const profileNames = Object.keys(profiles);
 

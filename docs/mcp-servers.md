@@ -7,7 +7,7 @@ GitHub MCP, filesystem servers, …) instead of bespoke tools.
 ## Configuration
 
 ```json
-// ~/.sc-agent/config.json or .sc-agent.json
+// ~/.sc-agent/config.json — global scope only (see trust note below)
 {
   "mcp": {
     "servers": {
@@ -17,6 +17,14 @@ GitHub MCP, filesystem servers, …) instead of bespoke tools.
   }
 }
 ```
+
+> **Workspace trust (#469):** `mcp.servers` is a privileged key — server
+> `command`/`args` spawn at session start, so the key is *ignored* (with a
+> stderr warning + `config.privileged_key_blocked` audit event) when it comes
+> from a config file inside the workspace (`.sc-agent.json` or an
+> inside-resolving `SC_CONFIG_PATH`). Configure MCP servers in the global
+> config only — otherwise cloning a hostile repo would run attacker commands
+> the moment `sc chat` opens.
 
 Per server:
 

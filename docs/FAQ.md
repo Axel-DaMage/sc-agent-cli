@@ -50,7 +50,7 @@ sc-agent              # Works offline
 ### Where are my config files stored?
 
 - **Global config**: `~/.sc-agent/config.json`
-- **Project config**: `.sc-agent.json` (in project root)
+- **Project config**: `.sc-agent.json` (in project root) — restricted scope: it may add deny rules (`denyPaths`/`denyCommands` merge additively) and tighten the sandbox, but cannot set `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`/`apiKey`, `permissions.autoApprove`, or weaken an enabled sandbox (#469)
 
 ### How do I reset my configuration?
 

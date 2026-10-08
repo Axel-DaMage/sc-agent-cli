@@ -157,7 +157,7 @@ program
       })();
       setVerboseLevel(verboseCount as any);
 
-      const config = await loadConfig(process.cwd());
+      const config = await loadConfig(process.cwd(), { auditLog: options.auditLog });
 
       // If a profile option is provided, override the active profile in config
       if (options.profile) {

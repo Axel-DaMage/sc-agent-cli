@@ -73,7 +73,9 @@ async function setupRun(
       runCli({
         args,
         cwd: ws,
-        env: chatEnv(ws, runOpts.env),
+        // #469: the workspace .sc-agent.json's model.baseUrl is now a blocked
+        // privileged key — route to the mock via SC_BASE_URL instead.
+        env: chatEnv(ws, { SC_BASE_URL: provider.baseUrl, ...runOpts.env }),
         input: runOpts.input,
         timeoutMs: runOpts.timeoutMs,
       }),

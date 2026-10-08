@@ -58,7 +58,9 @@ describe('offline CLI paths', () => {
     const ws = await makeWorkspace({ baseUrl: provider.baseUrl });
     cleanups.push(() => rm(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }));
 
-    const result = await runCli({ args: ['doctor'], cwd: ws, env: chatEnv(ws) });
+    // model.baseUrl is project-scope privileged (#469) — the mock endpoint
+    // reaches the child through SC_BASE_URL, not .sc-agent.json.
+    const result = await runCli({ args: ['doctor'], cwd: ws, env: chatEnv(ws, { SC_BASE_URL: provider.baseUrl }) });
 
     assert.equal(result.code, 0, describeRun(result));
     assert.match(result.stdout, /provider endpoint/);
@@ -77,7 +79,7 @@ describe('offline CLI paths', () => {
     const ws = await makeWorkspace({ baseUrl: deadBaseUrl });
     cleanups.push(() => rm(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }));
 
-    const result = await runCli({ args: ['doctor'], cwd: ws, env: chatEnv(ws) });
+    const result = await runCli({ args: ['doctor'], cwd: ws, env: chatEnv(ws, { SC_BASE_URL: deadBaseUrl }) });
 
     assert.equal(result.code, 1, describeRun(result));
     assert.match(result.stdout, /provider endpoint/);

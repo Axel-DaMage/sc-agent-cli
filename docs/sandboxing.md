@@ -30,6 +30,13 @@ Add a `sandbox` block to `.sc-agent.json` (project) or
 | `seccomp` | bool | `false` | Enable the syscall denylist (Linux + bwrap + x86_64 only). |
 | `seccompProfile` | path | – | Raw cBPF blob (e.g. `seccomp_export_bpf` output) replacing the built-in denylist. |
 
+> **Workspace trust (#469):** a project `.sc-agent.json` may opt the sandbox
+> in or tighten it, but once trusted config enables it, project-scope
+> `sandbox.*` keys are dropped — a repo cannot disable the boundary
+> (`enabled:false`), widen `egressAllowlist`/`writablePaths`, or supply its
+> own `seccompProfile`. `SC_SANDBOX=0` still wins per-run because env vars
+> come from the operator, not the repo.
+
 ## Backends
 
 | Backend | When | Boundary |

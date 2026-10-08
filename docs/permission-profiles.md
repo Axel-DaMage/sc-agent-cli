@@ -271,6 +271,23 @@ npm run build          # ✅ SAFE
 ### Config File Location
 `~/.sc-agent/config.json`
 
+### Project scope (`.sc-agent.json`) restrictions — #469
+
+A repository can ship `.sc-agent.json` to anyone who clones it, so project-scope
+config can only **restrict**, never **elevate**:
+
+- `permissions.autoApprove` from a project config is **ignored** (stderr
+  warning + `config.privileged_key_blocked` audit event) — a hostile repo
+  cannot silently auto-approve `run_shell`/`write_file`.
+- `permissions.denyPaths` merges **additively**: project entries are added on
+  top of the global list and global entries can never be removed (a
+  `denyPaths: []` in the project file does *not* wipe the baseline).
+- `permissions.denyCommands` is union-only the same way — a project can add
+  denials but can never erase the shipped credential-read defaults
+  (`denyCommands: []` does not wipe them).
+- The same boundary applies to any config file whose realpath resolves inside
+  the workspace (e.g. an `SC_CONFIG_PATH` pointing into the repo).
+
 ### Example Configuration
 
 **Traditional Mode:**
@@ -389,7 +406,7 @@ The built-in config seeds `denyCommands` with patterns that block the common fil
 
 Two important caveats:
 
-- **These are defaults, not built-ins.** A `denyCommands` list in your config replaces them wholesale — keep or copy these entries when you override.
+- **These are defaults, not built-ins.** A `denyCommands` list in your *global* config replaces them wholesale — keep or copy these entries when you override. In a *project-scope* `.sc-agent.json` they merge additively instead, so a repo file can add denials but can never remove the shipped protections (#469).
 - **They are best-effort, not a boundary.** An obfuscated command, a reader that isn't listed (`sudo cat`, `python -c`, `cp`), or a differently-named secret file slips past them. The hard guarantees live in the child-environment scrub and `sandbox.*` below — deny rules are tripwires, not walls.
 
 ### `run_shell` child environment (#471)
@@ -443,6 +460,12 @@ Independent of permission profiles, the optional `sandbox` config block wraps ev
   }
 }
 ```
+
+> **Project scope (#469):** while the sandbox is enabled by trusted config, a
+> project `.sc-agent.json` cannot weaken it — `sandbox.*` keys such as
+> `enabled:false`, wider `egressAllowlist`/`writablePaths`, or a repo-shipped
+> `seccompProfile` are dropped with a stderr warning. When the baseline leaves
+> the sandbox off, a project may only opt in/tighten.
 
 See [sandboxing.md](sandboxing.md) for the full profile schema and backend matrix.
 ## Unattended Git Guard (`-y` / `--permissions unlimited`)

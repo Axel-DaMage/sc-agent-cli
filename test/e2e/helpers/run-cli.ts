@@ -11,8 +11,10 @@
 //   * HOME/USERPROFILE point at the temp workspace, so ~/.sc-agent state
 //     (history, sessions, checkpoints, memory) is written inside the
 //     workspace and deleted with it;
-//   * the workspace carries a `.sc-agent.json` pointing model.baseUrl at
-//     the local mock provider — nothing but loopback is ever contacted.
+//   * the workspace carries a `.sc-agent.json` plus `prompt.md`; the provider
+//     endpoint reaches the child via the SC_BASE_URL env (callers pass it in
+//     `env`) because `model.baseUrl` is a privileged key a project-scope
+//     config can no longer set (#469) — nothing but loopback is contacted.
 
 import { execFile, type ExecFileException } from 'node:child_process';
 import { mkdtemp, writeFile } from 'node:fs/promises';
@@ -130,9 +132,12 @@ export interface WorkspaceOptions {
 }
 
 /**
- * Temp workspace: `.sc-agent.json` pointing at the mock provider plus a
- * `prompt.md` consumable via `--prompt-file prompt.md`. The caller owns
- * cleanup (`rm -rf` — see the cleanups pattern in the test files).
+ * Temp workspace: `.sc-agent.json` with the mock model settings plus a
+ * `prompt.md` consumable via `--prompt-file prompt.md`. The `baseUrl` key is
+ * still written — post-#469 it is ignored as a project-scope privileged key
+ * (the stderr warning doubles as coverage); routing actually comes from the
+ * SC_BASE_URL env the caller must pass (see `chatEnv` overrides).
+ * The caller owns cleanup (`rm -rf` — see the cleanups pattern in the test files).
  */
 export async function makeWorkspace(options: WorkspaceOptions): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'sc-e2e-'));

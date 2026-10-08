@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "description": "Example project-local config for SC-Agent CLI",
+  "_trust_note": "#469 — a repo-shipped .sc-agent.json can only RESTRICT, never elevate. Ignored at project scope (stderr warning per key): model.baseUrl, model.apiKey, profiles.*.baseUrl/apiKey, mcp.servers, plugins, settings.formatters, permissions.autoApprove. Set those in ~/.sc-agent/config.json or via SC_BASE_URL/SC_API_KEY.",
   "model": {
+    "_comment": "baseUrl/apiKey deliberately omitted — privileged keys ignored at project scope. Global config or env vars (SC_BASE_URL/SC_API_KEY) own endpoint + credentials.",
     "provider": "openai-compatible",
-    "baseUrl": "http://localhost:11434/v1",
     "model": "llama3.2",
     "temperature": 0.7,
     "maxTokens": 4096,
@@ -15,11 +16,7 @@
     "reviewer": "nvidia/meta/llama-3.3-70b-instruct"
   },
   "permissions": {
-    "autoApprove": [
-      "read_file",
-      "list_dir",
-      "search_text"
-    ],
+    "_autoApprove_note": "autoApprove omitted — ignored at project scope (#469); it can only widen approvals from the global config.",
     "denyPaths": [
       ".env",
       ".env.*",
@@ -27,19 +24,20 @@
       "**/*.pem",
       "**/*.secret"
     ],
+    "_denyPaths_note": "Project denyPaths merge ADDITIVELY over the global list — entries are added, global entries cannot be removed.",
     "denyCommands": [
       "git push --force",
       "rm -rf /",
       "curl * | *sh"
     ],
-    "_denyCommands_note": "Custom denyCommands REPLACE the shipped defaults (#471) that block `cat .env`, `cat *.key|*.pem`, `cat ~/.ssh/*`, `.sc-agent/config.json` and `/proc/*/environ` reads — copy them from docs/permission-profiles.md when overriding."
+    "_denyCommands_note": "Project denyCommands merge additively too (#469) — the shipped #471 credential-read defaults (`cat .env`, `cat *.key|*.pem`, `cat ~/.ssh/*`, `.sc-agent/config.json`, `/proc/*/environ`) can never be removed from project scope. To REPLACE them, set denyCommands in the global config and copy the defaults from docs/permission-profiles.md."
   },
   "run_shell": {
     "_comment": "#471 — spawned commands get a scrubbed env (PATH/HOME/shell basics only; credentials stripped unconditionally). allowedEnvVars passes extra VAR NAMES through; credential-shaped names are always ignored.",
     "allowedEnvVars": ["NPM_CONFIG_REGISTRY"]
   },
   "sandbox": {
-    "_comment": "Opt-in tool-call sandboxing (#423). See docs/sandboxing.md. enabled defaults to false; empty egressAllowlist blocks all non-loopback egress; denyPaths/denyCommands still apply (deny wins).",
+    "_comment": "Opt-in tool-call sandboxing (#423). See docs/sandboxing.md. enabled defaults to false; empty egressAllowlist blocks all non-loopback egress; denyPaths/denyCommands still apply (deny wins). #469: once trusted config enables the sandbox, project-scope sandbox.* keys are dropped — a repo can opt in/tighten, never weaken.",
     "enabled": false,
     "egressAllowlist": ["api.github.com:443"],
     "readOnlyPaths": [],

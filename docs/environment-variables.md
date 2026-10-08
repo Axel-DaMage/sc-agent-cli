@@ -472,6 +472,45 @@ export SC_CONFIG_PATH=/tmp/sc-agent/config.json
 scc chat
 ```
 
+> **Trust scope (#469):** the override only keeps *global* privileges when its
+> canonical realpath lands **outside** the workspace. A `SC_CONFIG_PATH` that
+> resolves inside the workspace root (symlinks resolved first) ships with the
+> repo and is filtered exactly like `.sc-agent.json` — see
+> [Workspace-trust boundary](#workspace-trust-boundary-469) below.
+
+
+
+
+## Workspace trust boundary (#469)
+
+Not an env var — a config-layer rule worth knowing when wiring environments:
+
+`loadConfig` merges `.sc-agent.json` (workspace root) **and any config file
+whose realpath resolves inside the workspace** at *project scope*. A repo can
+ship those files to anyone who clones it, so project scope may only
+**restrict**, never **elevate**:
+
+| Key | Project scope behavior |
+|-----|------------------------|
+| `mcp.servers` | **dropped** — server `command`/`args` would otherwise spawn at session start |
+| `plugins` | **dropped** — specifiers are `import()`'ed at session start (in-process RCE) |
+| `settings.formatters` | **dropped** — a shell-command list the `git` tool runs on commit/format |
+| `model.baseUrl` | **dropped** — would reroute the provider endpoint and exfiltrate `Authorization: Bearer` keys |
+| `model.apiKey` | **dropped** — would inject an attacker credential |
+| `profiles.*.baseUrl` / `profiles.*.apiKey` | **dropped** — same endpoint/credential primitive via `activeProfile`, `--profile`, or `SC_PROFILE` |
+| `permissions.autoApprove` | **dropped** — would silently auto-approve mutating tools |
+| `permissions.denyPaths` / `permissions.denyCommands` | **union-only** — project entries are added; the global baseline can never be removed |
+| `sandbox.*` | **dropped while the baseline sandbox is enabled** — a project can opt in or tighten (`enabled:true`, `seccomp:true`), never weaken an active boundary (`enabled:false`, wider allowlists, `seccompProfile`) |
+
+Each dropped key prints one stderr line —
+`sc-agent: ignoring project-scope privileged key "<key.path>" from <file>` —
+and, when `--audit-log <path>` is enabled, appends a
+`config.privileged_key_blocked` event (`{key_path, source_file, scope}`) to the
+JSONL stream. A project config that declares `denyPaths`/`denyCommands` also
+prints a `project <key> merge additively; global entries cannot be removed`
+note (one per declared key). All of this is soft-failure: the run continues
+normally (exit 0).
+
 
 
 

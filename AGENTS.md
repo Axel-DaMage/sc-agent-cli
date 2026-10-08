@@ -16,7 +16,7 @@
 ### Core Components
 
 - **`src/core/types.ts`**: TypeScript type definitions (messages, tools, config)
-- **`src/core/config.ts`**: Configuration loading/saving with profile support
+- **`src/core/config.ts`**: Configuration loading/saving with profile support; workspace trust boundary (#469) — config files whose realpath resolves inside the workspace get project scope: `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`/`apiKey`, `profiles.*.baseUrl`/`apiKey`, and `permissions.autoApprove` are dropped (stderr warning per key + `config.privileged_key_blocked` audit event under `--audit-log`), `permissions.denyPaths`/`denyCommands` merge additively, and project `sandbox.*` keys that would weaken an enabled baseline are dropped
 - **`src/core/provider.ts`**: OpenAI-compatible API client with streaming + failover contract (dual timeouts, bounded retry, provider/model cascade)
 - **`src/core/failover.ts`**: Failover contract — timeout resolution, transient-error classification, backoff, SC_FAILOVER chain resolution, ProviderFailoverError
 - **`src/core/roles.ts`**: Multi-model orchestration (#424) — `planner`/`executor`/`reviewer` role routing for headless runs via `config.roles` (`provider/model` aliases), `PhaseTracker` append-only segment log, per-phase read-only policy and completion-guard suppression, `--role`/`SC_ROLE` single-phase pin; #462 adds the reviewer/judge consensus loop — `VERDICT:` marker parsing (`approve`/`request_changes`), `request_changes` → bounded executor rework (`SC_ROLE_MAX_FIXES`, default 3), one-time same-provider diversity warning, manifest `review` block
@@ -115,9 +115,9 @@
 
 1. Built-in defaults
 2. Global config (`~/.sc-agent/config.json`)
-3. Project config (`.sc-agent.json`)
+3. Project config (`.sc-agent.json`) — restricted scope: may only restrict, never elevate (#469)
 4. Active profile overrides
-5. Environment variables (SC_API_KEY, SC_MODEL, SC_BASE_URL, SC_PROFILE; SC_CONFIG_PATH relocates the global config file itself)
+5. Environment variables (SC_API_KEY, SC_MODEL, SC_BASE_URL, SC_PROFILE; SC_CONFIG_PATH relocates the global config file itself — resolving inside the workspace demotes it to project scope)
 
 ### Permission System
 

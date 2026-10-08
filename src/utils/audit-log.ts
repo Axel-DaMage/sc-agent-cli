@@ -5,7 +5,7 @@ import { appendFileSecureSync } from './secure-fs.js';
 import { redactDeep } from './secret-redaction.js';
 
 export interface AuditEvent {
-  type: 'llm_request' | 'llm_response' | 'tool_call' | 'tool_result' | 'devcontainer' | 'sandbox_violation' | 'context_budget';
+  type: 'llm_request' | 'llm_response' | 'tool_call' | 'tool_result' | 'devcontainer' | 'sandbox_violation' | 'context_budget' | 'config.privileged_key_blocked';
   [key: string]: unknown;
 }
 

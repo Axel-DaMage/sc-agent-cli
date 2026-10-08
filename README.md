@@ -200,6 +200,7 @@ The agent has access to:
 
 - **Path validation**: All file operations are restricted to the workspace root
 - **Deny patterns**: Configured patterns (e.g., `.env`, `*.key`) are blocked
+- **Workspace trust**: a cloned repo's `.sc-agent.json` (or any config file resolving inside the workspace) can only *restrict* — `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`, `model.apiKey`, `profiles.*.baseUrl`/`apiKey`, and `permissions.autoApprove` are ignored with a stderr warning (+ `config.privileged_key_blocked` in `--audit-log`); `permissions.denyPaths`/`denyCommands` merge additively and can never remove global entries, and an enabled `sandbox` cannot be weakened
 - **Scrubbed child env**: Spawned commands (`run_shell`, MCP servers) get an allowlisted environment — provider credentials (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `SC_*`, …) never reach the child, and known secrets are masked (`***`) in shell output before it enters model context
 - **Shell deny defaults**: `permissions.denyCommands` ships with rules blocking `cat .env`-style credential reads; `denyPaths` guards the file tools only — it does not constrain `run_shell` (see `docs/permission-profiles.md`)
 - **Permission system**: Sensitive operations require explicit approval unless auto-approved
@@ -236,15 +237,23 @@ Or configure permissions manually in `~/.sc-agent/config.json` or `.sc-agent.jso
 }
 ```
 
+> **Project scope note (#469):** `autoApprove` only takes effect from trusted
+> config (the global file or a config path resolving outside the workspace) —
+> a repo-shipped `.sc-agent.json` cannot widen approvals. `denyPaths` and
+> `denyCommands` in project scope merge *additively* on top of the global
+> lists — a project may add denials, never remove them.
+
 ## Configuration Hierarchy
 
 1. **Defaults** (built into the CLI)
-2. **Global config** (`~/.sc-agent/config.json`)
-3. **Project config** (`.sc-agent.json` in project root)
+2. **Global config** (`~/.sc-agent/config.json`, or the `SC_CONFIG_PATH` override when it resolves *outside* the workspace)
+3. **Project config** (`.sc-agent.json` in project root — plus any config file whose realpath lands *inside* the workspace)
 4. **Active profile** (overrides model settings)
 5. **Environment variables** (highest priority for API keys)
 
 Project configs override global settings, the active profile overrides model configuration, and environment variables override API keys.
+
+**Workspace trust boundary (#469):** config loaded from inside the workspace is untrusted — it may restrict but never elevate. Ignored at project scope (each drop emits a stderr warning): `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`, `model.apiKey`, `profiles.*.baseUrl`/`apiKey`, `permissions.autoApprove`; while the baseline sandbox is enabled, project `sandbox.*` keys that would weaken it are dropped too. `permissions.denyPaths`/`denyCommands` merge additively — project entries are added, global entries cannot be removed.
 
 ## Environment Variables
 

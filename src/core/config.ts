@@ -1,9 +1,11 @@
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import chalk from 'chalk';
 import type { ProjectConfig } from './types.js';
 import { ensureSecureDir, warnOnLoosePermissions, writeFileSecure } from '../utils/secure-fs.js';
+import { AuditLogger } from '../utils/audit-log.js';
 
 const CONFIG_DIR = path.join(homedir(), '.sc-agent');
 const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -111,6 +113,13 @@ export interface LoadConfigOptions {
    * global config (e.g. an activeProfile) cannot leak into assertions.
    */
   globalConfigPath?: string | null;
+  /**
+   * `--audit-log` path (#469): privileged keys dropped from project-scope
+   * config files are appended as `config.privileged_key_blocked` events.
+   * The stderr warning is unconditional; without this flag nothing is
+   * persisted.
+   */
+  auditLog?: string;
 }
 
 export async function loadConfig(
@@ -119,17 +128,34 @@ export async function loadConfig(
 ): Promise<ProjectConfig> {
   let config = structuredClone(DEFAULT_CONFIG);
 
+  // Audit sink for blocked project-scope keys (#469). Same best-effort
+  // contract as the run's logger — an unwritable path must not block loading.
+  let audit: AuditLogger | undefined;
+  if (options?.auditLog) {
+    try {
+      audit = new AuditLogger(options.auditLog);
+    } catch {
+      audit = undefined;
+    }
+  }
+
   // Load global config (explicit option wins; otherwise SC_CONFIG_PATH/default)
   const globalConfigPath =
     options?.globalConfigPath === undefined ? getGlobalConfigPath() : options.globalConfigPath;
   if (globalConfigPath !== null) {
-    config = await mergeConfigFile(config, globalConfigPath, 'global');
+    // #469 — trust boundary: an explicitly selected config file whose
+    // canonical path lands INSIDE the workspace shipped with the repo, so it
+    // only earns project-scope privileges (privileged keys are filtered).
+    // A path resolving outside stays user-trusted at global scope.
+    const scope: ConfigScope =
+      projectRoot && isInsideWorkspace(globalConfigPath, projectRoot) ? 'project' : 'global';
+    config = await mergeConfigFile(config, globalConfigPath, scope, audit);
   }
 
   // Load project-local config if in a project
   if (projectRoot) {
     const projectConfigPath = path.join(projectRoot, '.sc-agent.json');
-    config = await mergeConfigFile(config, projectConfigPath, 'project');
+    config = await mergeConfigFile(config, projectConfigPath, 'project', audit);
   }
 
   // Override active profile from environment variable if set
@@ -442,10 +468,205 @@ function deepMerge<T extends object>(
 
 type ConfigScope = 'global' | 'project';
 
+// #469 — workspace trust boundary: does `filePath` resolve INSIDE the
+// workspace? Both sides are canonicalized (realpath) before the containment
+// test so symlinks in either direction cannot blur the boundary: a symlink
+// inside the workspace pointing out keeps global privileges, while an
+// outside path that resolves in is untrusted.
+function isInsideWorkspace(filePath: string, workspaceRoot: string): boolean {
+  let wsReal: string;
+  try {
+    wsReal = realpathSync(workspaceRoot);
+  } catch {
+    wsReal = path.resolve(workspaceRoot);
+  }
+
+  const resolved = path.resolve(filePath);
+  let real: string;
+  try {
+    real = realpathSync(resolved);
+  } catch {
+    real = resolved; // missing files merge nothing — scope is moot anyway
+  }
+
+  // Windows filesystems are case-insensitive; realpathSync does not
+  // normalize casing, so compare lowercase there.
+  const [ws, target] =
+    process.platform === 'win32' ? [wsReal.toLowerCase(), real.toLowerCase()] : [wsReal, real];
+  // A filesystem-root workspace ("/", "C:\") already ends with the separator.
+  const wsPrefix = ws.endsWith(path.sep) ? ws : ws + path.sep;
+  return target === ws || target.startsWith(wsPrefix);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * #469 — project-scope config may only *restrict*, never elevate. A
+ * repository ships `.sc-agent.json` (and any config file that resolves
+ * inside the workspace) to anyone who clones it, so keys that could spawn
+ * processes, reroute the provider endpoint, inject credentials, or widen
+ * unattended approvals are dropped before merge — one stderr line per key
+ * plus a `config.privileged_key_blocked` audit event when --audit-log is on.
+ *
+ * `permissions.denyPaths`/`permissions.denyCommands` are the exception: they
+ * merge additively (a project may add deny entries, never remove baseline
+ * ones — `denyCommands: []` would otherwise erase the shipped #471
+ * credential-read protections).
+ *
+ * Blocking `model.baseUrl`/`model.apiKey` alone would be cosmetic — the
+ * same primitive is reachable through `profiles.*` when `activeProfile`,
+ * `--profile`, or `SC_PROFILE` selects it — so the profile entries are
+ * stripped of endpoint/credential keys too.
+ */
+function filterProjectScopeConfig(
+  parsed: Partial<ProjectConfig>,
+  baseline: ProjectConfig,
+  sourceFile: string,
+  audit: AuditLogger | undefined
+): Partial<ProjectConfig> {
+  if (!isPlainObject(parsed)) {
+    return parsed; // deepMerge already contributes nothing for non-objects
+  }
+  const record = parsed as Record<string, unknown>;
+
+  const block = (keyPath: string): void => {
+    console.warn(
+      chalk.yellow(`sc-agent: ignoring project-scope privileged key "${keyPath}" from ${sourceFile}`)
+    );
+    audit?.emit({
+      type: 'config.privileged_key_blocked',
+      key_path: keyPath,
+      source_file: sourceFile,
+      scope: 'project',
+    });
+  };
+
+  // model.baseUrl reroutes the provider endpoint — env/global API keys would
+  // then be sent as `Authorization: Bearer` to an attacker host. model.apiKey
+  // injects an attacker credential.
+  if (isPlainObject(record.model)) {
+    for (const key of ['baseUrl', 'apiKey']) {
+      if (Object.hasOwn(record.model, key)) {
+        block(`model.${key}`);
+        delete record.model[key];
+      }
+    }
+  }
+
+  // Same primitive via indirection: a profile's baseUrl/apiKey applies when
+  // the profile is activated (activeProfile, --profile, SC_PROFILE).
+  if (isPlainObject(record.profiles)) {
+    for (const [name, profile] of Object.entries(record.profiles)) {
+      if (!isPlainObject(profile)) continue;
+      for (const key of ['baseUrl', 'apiKey']) {
+        if (Object.hasOwn(profile, key)) {
+          block(`profiles.${name}.${key}`);
+          delete profile[key];
+        }
+      }
+    }
+  }
+
+  // mcp.servers command/args are spawned verbatim at session start — RCE.
+  if (isPlainObject(record.mcp) && Object.hasOwn(record.mcp, 'servers')) {
+    block('mcp.servers');
+    delete record.mcp.servers;
+  }
+
+  // plugins entries are dynamic-import()'ed at session start — in-process
+  // code execution, the same RCE primitive as mcp.servers.
+  if (Object.hasOwn(record, 'plugins')) {
+    block('plugins');
+    delete record.plugins;
+  }
+
+  // settings.formatters is a shell-command list run by the `git` tool on
+  // commit/format — attacker-controlled process execution via config, same
+  // class as mcp.servers/plugins.
+  if (isPlainObject(record.settings) && Object.hasOwn(record.settings, 'formatters')) {
+    block('settings.formatters');
+    delete record.settings.formatters;
+  }
+
+  // Sandbox boundary (#423): while the baseline has the sandbox ON, every
+  // project-side sandbox key can only weaken it — "sandbox off", a wider
+  // egress/writable allowlist, or a repo-shipped seccomp profile. Those are
+  // dropped; idempotent tightenings (enabled:true / seccomp:true) merge.
+  // When the baseline leaves the sandbox off, a project opting in can only
+  // restrict, so the block passes through untouched.
+  if (isPlainObject(record.sandbox) && baseline.sandbox?.enabled === true) {
+    const TIGHTENING = new Map<string, unknown>([
+      ['enabled', true],
+      ['seccomp', true],
+    ]);
+    for (const key of Object.keys(record.sandbox)) {
+      if (TIGHTENING.has(key) && TIGHTENING.get(key) === record.sandbox[key]) continue;
+      block(`sandbox.${key}`);
+      delete record.sandbox[key];
+    }
+  }
+
+  if (Object.hasOwn(record, 'permissions')) {
+    if (!isPlainObject(record.permissions)) {
+      // A non-object permissions value would replace the whole block —
+      // wiping the denyPaths/denyCommands baseline. Escalation by shape.
+      block('permissions');
+      delete record.permissions;
+    } else {
+      // autoApprove widens which tools run without prompting — never merges.
+      if (Object.hasOwn(record.permissions, 'autoApprove')) {
+        block('permissions.autoApprove');
+        delete record.permissions.autoApprove;
+      }
+
+      // denyPaths/denyCommands are union-only: a project may add deny
+      // entries (legitimate hardening) but can never express removals, so
+      // the shipped/global baseline always survives. `[]` while baseline
+      // entries exist reads as a wipe attempt — the stderr note covers it
+      // and the same blocked-key audit event records it.
+      for (const key of ['denyPaths', 'denyCommands'] as const) {
+        if (!Object.hasOwn(record.permissions, key)) continue;
+        const declared = record.permissions[key];
+        const baselineDeny = baseline.permissions?.[key] ?? [];
+        if (Array.isArray(declared)) {
+          console.warn(
+            chalk.yellow(
+              `sc-agent: project ${key} merge additively; global entries cannot be removed (from ${sourceFile})`
+            )
+          );
+          if (declared.length === 0 && baselineDeny.length > 0) {
+            audit?.emit({
+              type: 'config.privileged_key_blocked',
+              key_path: `permissions.${key}`,
+              source_file: sourceFile,
+              scope: 'project',
+            });
+          }
+          record.permissions[key] = [
+            ...new Set([
+              ...baselineDeny,
+              ...declared.filter((entry): entry is string => typeof entry === 'string'),
+            ]),
+          ];
+        } else {
+          // A non-array value would *replace* the baseline — block it.
+          block(`permissions.${key}`);
+          delete record.permissions[key];
+        }
+      }
+    }
+  }
+
+  return parsed;
+}
+
 async function mergeConfigFile(
   config: ProjectConfig,
   configPath: string,
-  scope: ConfigScope
+  scope: ConfigScope,
+  audit?: AuditLogger
 ): Promise<ProjectConfig> {
   let data: string;
 
@@ -478,6 +699,10 @@ async function mergeConfigFile(
       `Fix the file or re-run "sc config-init" to recreate the default config.`,
       { cause: err }
     );
+  }
+
+  if (scope === 'project') {
+    parsedConfig = filterProjectScopeConfig(parsedConfig, config, configPath, audit);
   }
 
   return deepMerge(config, parsedConfig, undefined, configPath);

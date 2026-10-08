@@ -114,11 +114,13 @@ Tools receive a **ToolContext** with:
 Hierarchical config loading:
 
 1. **Built-in defaults**: Defined in code
-2. **Global config**: `~/.sc-agent/config.json`
-3. **Project config**: `.sc-agent.json` in workspace
+2. **Global config**: `~/.sc-agent/config.json` (or `SC_CONFIG_PATH` resolving outside the workspace)
+3. **Project config**: `.sc-agent.json` in workspace — plus any config file whose realpath lands inside the workspace (#469)
 4. **Active profile**: Overrides model settings
 
 **Deep merging**: Later configs override earlier ones, but objects merge recursively (profiles accumulate, not replace).
+
+**Workspace trust (#469)**: project-scope layers may only restrict. `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`/`apiKey`, `profiles.*.baseUrl`/`apiKey`, and `permissions.autoApprove` are dropped with a stderr warning + `config.privileged_key_blocked` audit event; `permissions.denyPaths`/`denyCommands` merge additively (global entries cannot be removed); while the baseline sandbox is enabled, project `sandbox.*` keys that would weaken it are dropped too.
 
 ### 6. Permission System (`src/utils/permissions.ts`)
 
