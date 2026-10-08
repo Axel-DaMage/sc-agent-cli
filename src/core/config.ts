@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import chalk from 'chalk';
 import type { ProjectConfig } from './types.js';
 import { ensureSecureDir, warnOnLoosePermissions, writeFileSecure } from '../utils/secure-fs.js';
 
@@ -343,28 +344,56 @@ export async function initConfig(force = false): Promise<void> {
   await saveConfig(DEFAULT_CONFIG, true);
 }
 
-function deepMerge<T extends object>(base: T, override: Partial<T>, visited?: WeakSet<object>): T {
+// Keys that must never be copied from a config file (#478): `result[key] = v`
+// goes through [[Set]], so `__proto__` invokes the prototype setter and mutates
+// the merged object's prototype instead of creating an own property.
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function deepMerge<T extends object>(
+  base: T,
+  override: Partial<T>,
+  visited?: WeakSet<object>,
+  source?: string,
+  keyPath = ''
+): T {
+  const result = { ...base } as Record<string, unknown>;
+  // Non-object overrides (e.g. a config file containing `null` or a bare
+  // primitive) contribute nothing — for...in silently ignored them too.
+  if (override == null || typeof override !== 'object') {
+    return result as T;
+  }
   if (visited?.has(override)) {
     throw new Error('Circular reference detected in config merge');
   }
   const seen = visited || new WeakSet<object>();
   seen.add(override);
-  const result = { ...base };
-  for (const key in override) {
-    const val = override[key];
+  // Object.keys iterates own enumerable keys only — a polluted prototype on
+  // `override` must not leak inherited members into the merged config.
+  for (const key of Object.keys(override)) {
+    if (UNSAFE_MERGE_KEYS.has(key)) {
+      console.warn(
+        chalk.yellow(
+          `⚠️  Ignoring unsafe config key "${keyPath}${key}"${source ? ` in ${source}` : ''}`
+        )
+      );
+      continue;
+    }
+    const val = (override as Record<string, unknown>)[key];
     if (val !== undefined) {
       if (typeof val === 'object' && !Array.isArray(val) && val !== null) {
         result[key] = deepMerge(
           (result[key] as Record<string, unknown>) || {},
           val as Record<string, unknown>,
-          seen
-        ) as T[Extract<keyof T, string>];
+          seen,
+          source,
+          `${keyPath}${key}.`
+        );
       } else {
-        result[key] = val as T[Extract<keyof T, string>];
+        result[key] = val;
       }
     }
   }
-  return result;
+  return result as T;
 }
 
 type ConfigScope = 'global' | 'project';
@@ -407,7 +436,7 @@ async function mergeConfigFile(
     );
   }
 
-  return deepMerge(config, parsedConfig);
+  return deepMerge(config, parsedConfig, undefined, configPath);
 }
 
 function isMissingFileError(err: unknown): err is NodeJS.ErrnoException {

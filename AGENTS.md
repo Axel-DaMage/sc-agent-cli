@@ -150,6 +150,7 @@
 ### Phase 3 — Robusteza (Edge Cases & Hardening)
 
 - **`deepMerge` cycle detection**: Uses `WeakSet` to track visited objects; throws on circular references in config
+- **`deepMerge` prototype-pollution guard (#478)**: Iterates own enumerable keys only (`Object.keys`) and skips `__proto__`/`constructor`/`prototype` at every merge level with a stderr warning naming the key path and file; the same denylist guards the repo-probe manifest parsers (TOML/YAML/Makefile/XML) and the permission-prompt arg redaction
 - **URL validation**: `validateConfig` + `provider.ts` validate `baseUrl` with `new URL()` before use
 - **`collectFiles` depth limit**: Max 20 directory depth to prevent stack overflow on deeply nested trees
 - **`unlinkSync` error propagation**: Logs warning with error message instead of silent catch during cleanup

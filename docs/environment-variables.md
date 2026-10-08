@@ -528,6 +528,20 @@ Relocates the session-artifact root directory. `session.json`/`status.json` trac
 
 ---
 
+### SC_CHECKPOINT_DIR
+
+Relocates the checkpoint root directory. Checkpoints written by `--checkpoint` land under `SC_CHECKPOINT_DIR/<sessionId>.json` instead of the default. Useful for tests and sandboxed CI runs that must not touch the host's `~/.sc-agent/`.
+
+**Default:** `~/.sc-agent/checkpoints/`
+
+### SC_SESSIONS_DIR
+
+Relocates the session-artifact root directory. `session.json`/`status.json` traces land under `SC_SESSIONS_DIR/<sessionId>/` instead of the default. Useful for tests and sandboxed CI runs.
+
+**Default:** `~/.sc-agent/sessions/`
+
+---
+
 ## Headless Output Markers
 
 These are **not** environment inputs — the CLI *emits* them so wrappers and CI can branch on run outcomes without parsing prose. In `--output-format text` they go to stdout; with `--output-format json` stdout is reserved for the run manifest, so markers move to stderr.

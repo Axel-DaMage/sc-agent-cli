@@ -207,10 +207,11 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
     'jwt', 'jwt_token', 'sessionKey', 'session_key',
     'sshKey', 'ssh_key', 'sshPrivateKey',
   ]);
-  const redactedArgs: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(ctx.args)) {
-    redactedArgs[k] = SENSITIVE_KEYS.has(k) ? '***' : v;
-  }
+  // Object.fromEntries defines own properties instead of assigning through
+  // [[Set]] — a '__proto__' key in tool args can't mutate the prototype (#478).
+  const redactedArgs: Record<string, unknown> = Object.fromEntries(
+    Object.entries(ctx.args).map(([k, v]) => [k, SENSITIVE_KEYS.has(k) ? '***' : v])
+  );
   console.log(chalk.gray(`\n${boxHeader('Permission', 2)}`));
   console.log(chalk.gray(`  │ ${chalk.yellow('🔐')} Tool: ${ctx.toolName}`));
   console.log(chalk.gray(`  │    Args: ${JSON.stringify(redactedArgs)}`));

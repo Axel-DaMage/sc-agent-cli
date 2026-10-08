@@ -291,6 +291,101 @@ test('validateConfig rejects malformed context block values', async () => {
   assert.doesNotThrow(() => validateConfig(ok));
 });
 
+// --- deepMerge prototype-pollution guard (#478) -------------------------------
+
+// Raw JSON text (not JSON.stringify) so `__proto__` lands as an own
+// enumerable key — the exact shape a crafted config file produces.
+async function createProjectWithRawConfig(rawJson: string): Promise<string> {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), 'sc-agent-config-'));
+  await writeFile(path.join(projectRoot, '.sc-agent.json'), rawJson, 'utf-8');
+  return projectRoot;
+}
+
+test('loadConfig: __proto__/constructor/prototype keys cannot alter the merged prototype', async () => {
+  const projectRoot = await createProjectWithRawConfig(
+    '{"__proto__":{"polluted":"yes"},"constructor":{"polluted":1},"prototype":{"polluted":2},' +
+      '"model":{"model":"legit-model"}}'
+  );
+
+  const config = await loadIsolated(projectRoot);
+
+  assert.equal(Object.getPrototypeOf(config), Object.prototype);
+  assert.equal((config as Record<string, unknown>).polluted, undefined);
+  assert.ok(!('polluted' in {}), 'Object.prototype must stay clean');
+  assert.equal(config.model.model, 'legit-model');
+});
+
+test('loadConfig: dangerous keys are skipped at nested merge levels', async () => {
+  const projectRoot = await createProjectWithRawConfig(
+    '{"model":{"__proto__":{"polluted":"nested"},"constructor":{"x":1},"prototype":{"y":2},' +
+      '"model":"nested-model"},"sandbox":{"enabled":true,"__proto__":{"polluted":true}}}'
+  );
+
+  const config = await loadIsolated(projectRoot);
+
+  assert.equal(config.model.model, 'nested-model');
+  assert.equal(Object.getPrototypeOf(config.model), Object.prototype);
+  assert.equal((config.model as Record<string, unknown>).polluted, undefined);
+  assert.equal(Object.hasOwn(config.model, 'constructor'), false);
+  assert.equal(Object.hasOwn(config.model, 'prototype'), false);
+
+  assert.equal(config.sandbox?.enabled, true);
+  assert.equal(Object.getPrototypeOf(config.sandbox), Object.prototype);
+  assert.equal((config.sandbox as Record<string, unknown>).polluted, undefined);
+  assert.ok(!('polluted' in {}), 'Object.prototype must stay clean');
+});
+
+test('loadConfig: dangerous keys in the global config file are also skipped', async () => {
+  const globalDir = await mkdtemp(path.join(tmpdir(), 'sc-agent-global-'));
+  const globalPath = path.join(globalDir, 'config.json');
+  await writeFile(
+    globalPath,
+    '{"__proto__":{"polluted":"global"},"model":{"model":"global-model"}}',
+    'utf-8'
+  );
+
+  const config = await loadConfig(undefined, { globalConfigPath: globalPath });
+
+  assert.equal(Object.getPrototypeOf(config), Object.prototype);
+  assert.equal((config as Record<string, unknown>).polluted, undefined);
+  assert.equal(config.model.model, 'global-model');
+});
+
+test('loadConfig: warns naming the unsafe key path and the config file', async () => {
+  const projectRoot = await createProjectWithRawConfig(
+    '{"model":{"__proto__":{"polluted":1},"model":"m"}}'
+  );
+  const configPath = path.join(projectRoot, '.sc-agent.json');
+
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  // Read mock.calls before restoring — mockRestore() clears recorded calls.
+  let messages: string[] = [];
+  try {
+    await loadIsolated(projectRoot);
+    messages = warnSpy.mock.calls.map((c) => String(c[0]));
+  } finally {
+    warnSpy.mockRestore();
+  }
+  assert.ok(
+    messages.some((m) => m.includes('model.__proto__') && m.includes(configPath)),
+    `expected a warning naming "model.__proto__" and ${configPath}, got: ${messages.join(' | ')}`
+  );
+});
+
+test('loadConfig: inherited enumerable properties are never merged', async () => {
+  const projectRoot = await createProjectWithRawConfig('{"model":{"model":"m"}}');
+  (Object.prototype as Record<string, unknown>).injectedInherited = 'nope';
+  try {
+    const config = await loadIsolated(projectRoot);
+    // hasOwn, not truthiness — the injected member still resolves through the
+    // prototype chain; the guard must keep it from becoming an own property.
+    assert.equal(Object.hasOwn(config, 'injectedInherited'), false);
+    assert.equal(Object.hasOwn(config.model, 'injectedInherited'), false);
+  } finally {
+    delete (Object.prototype as Record<string, unknown>).injectedInherited;
+  }
+});
+
 // --- SC_CONFIG_PATH relocation (#499) -----------------------------------------
 
 test('getGlobalConfigPath honors SC_CONFIG_PATH; blank/unset falls back to the default', () => {
