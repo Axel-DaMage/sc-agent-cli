@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { ensureSecureDirSync, writeFileSecureSync } from './secure-fs.js';
 
 const PERMS_DIR = join(homedir(), '.sc-agent');
 const PERMS_FILE = join(PERMS_DIR, 'permissions.json');
@@ -35,8 +36,8 @@ export function savePermissions(perms: Partial<PersistedPermissions>): void {
   try {
     const current = loadPermissions();
     const merged = { ...current, ...perms, updated: Date.now() };
-    if (!existsSync(PERMS_DIR)) mkdirSync(PERMS_DIR, { recursive: true });
-    writeFileSync(PERMS_FILE, JSON.stringify(merged, null, 2));
+    ensureSecureDirSync(PERMS_DIR);
+    writeFileSecureSync(PERMS_FILE, JSON.stringify(merged, null, 2));
   } catch {
     // Silent failure — persistence is optional
   }

@@ -7,6 +7,25 @@ export interface DangerousPattern {
   severity: 'critical' | 'high' | 'medium';
 }
 
+// ── Shared sensitive-path sub-expressions (#473) ─────────────────────────
+// Credential/config targets reused by several rules below. HOME_PREFIX
+// covers `~`, `~user`, `$HOME`, `${HOME}` and absolute /root|/home/<user>.
+const HOME_PREFIX = String.raw`(?:~[^\s/"'\\]*|\$HOME|\$\{HOME\}|/root|/home/[^\s/"'\\]+)`;
+const CRED_DIRS = String.raw`\.(?:ssh|gnupg|aws|azure|kube|docker|sc-agent|config|cargo|heroku|netlify)`;
+const RC_FILES = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|gitconfig|git-credentials|netrc|npmrc|yarnrc|pypirc|pgpass|s3cfg|my\.cnf|boto|bash_history|zsh_history|mysql_history|psql_history|python_history|node_repl_history|viminfo|lesshst|env)`;
+const KEY_MATERIAL = String.raw`(?:[^\s/"'\\]*\bid_(?:rsa|ed25519|ecdsa|dsa)\b[^\s/"'\\]*|\bauthorized_keys\b|[^\s/"'\\]+\.(?:pem|key|p12|pfx|ppk|jks|kdbx?)\b)`;
+const ETC_SECRETS = String.raw`/etc/(?:shadow|gshadow|sudoers|ssh|ssl/private|security|pam\.d|cron)`;
+const PROC_ENVIRON = String.raw`/proc/(?:self|\d+|\*)/environ`;
+// Read-sensitive: any reference to the targets above.
+const SENSITIVE_PATH = String.raw`(?:${HOME_PREFIX}/(?:${CRED_DIRS}|${RC_FILES})|${CRED_DIRS}/|${KEY_MATERIAL}|${ETC_SECRETS}|${PROC_ENVIRON})`;
+// Write-sensitive: same set, plus /etc at large (matches the redirect rules).
+const SENSITIVE_WRITE_PATH = String.raw`(?:${SENSITIVE_PATH}|/etc/|/root/)`;
+// File readers, content processors, archivers and editors that can disclose
+// or stage sensitive material.
+const READERS = String.raw`(?:cat|head|tail|less|more|bat|xxd|hexdump|od|strings|nl|zcat|bzcat|grep|egrep|fgrep|awk|sed|perl|base64|openssl|gpg|ssh-keygen|tar|zip|gzip|bzip2|xz|7z|rar|nano|pico|vi|vim|nvim|emacs|code|sudoedit|sqlite3)`;
+// Interpreters/shells a pipeline can feed.
+const INTERPRETERS = String.raw`(?:python[0-9.]*|pypy[0-9.]*|node(?:js)?|perl|ruby|php|lua[0-9.]*|bash|sh|zsh|fish|dash|ksh|pwsh|powershell(?:\.exe)?|cmd(?:\.exe)?|deno|bun)`;
+
 export const DANGEROUS_COMMANDS: DangerousPattern[] = [
   // File Deletion - CRITICAL
   {
@@ -33,6 +52,49 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     description: 'Delete files (system call)',
     severity: 'critical',
   },
+  // Alternate deleters - the rm-shaped hole is not the whole story (#473)
+  {
+    pattern: /\bfind\s[^;&|]*?-delete\b/,
+    category: 'file-deletion',
+    description: 'find -delete removes matched files',
+    severity: 'critical',
+  },
+  {
+    pattern: /\b(?:shred|wipe|srm)\s+\S/,
+    category: 'file-deletion',
+    description: 'Secure file destruction (shred/wipe/srm)',
+    severity: 'critical',
+  },
+  {
+    pattern: /\btruncate\s+(?:-s\b|-s=|--size\b)/,
+    category: 'file-deletion',
+    description: 'Truncate file (destroys contents)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bcipher\s+\/w/i,
+    category: 'file-deletion',
+    description: 'Wipe free space (Windows cipher /w)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bhistory\s+-c\b/,
+    category: 'defense-evasion',
+    description: 'Clear shell history (anti-forensics)',
+    severity: 'medium',
+  },
+  {
+    pattern: /\battrib\s+\+h/i,
+    category: 'defense-evasion',
+    description: 'Hide files (Windows attrib +h)',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:wevtutil\s+cl\b|vssadmin\s+delete|wbadmin\s+delete)/i,
+    category: 'defense-evasion',
+    description: 'Delete logs/backups (anti-forensics)',
+    severity: 'high',
+  },
 
   // Recursive/Force deletion - CRITICAL
   {
@@ -48,7 +110,7 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     severity: 'critical',
   },
   {
-    pattern: /\brd\s+\/s/i,
+    pattern: /\b(?:rd|rmdir)\s+\/s/i,
     category: 'recursive-deletion',
     description: 'Recursive delete (Windows rd /s)',
     severity: 'critical',
@@ -62,9 +124,15 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     severity: 'critical',
   },
   {
-    pattern: /\bsu\s+-/,
+    pattern: /\bsu\s+\S/,
     category: 'privilege-escalation',
     description: 'Switch user',
+    severity: 'critical',
+  },
+  {
+    pattern: /\b(?:doas|pkexec|runuser)\s+/,
+    category: 'privilege-escalation',
+    description: 'Privilege escalation (doas/pkexec/runuser)',
     severity: 'critical',
   },
   {
@@ -72,6 +140,52 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     category: 'privilege-escalation',
     description: 'Run as administrator (Windows)',
     severity: 'critical',
+  },
+  // (?<![\w/]) — flag these only as command words; /etc/passwd,
+  // /etc/adduser.conf & friends are path arguments, not invocations (#473).
+  {
+    pattern: /(?<![\w/])(?:passwd|chpasswd|useradd|adduser|userdel|deluser|usermod|groupadd|groupmod|groupdel|chsh|chfn|visudo|vigr|pwconv|grpconv|newgrp|newusers)\b/,
+    category: 'account-management',
+    description: 'User/group/password management',
+    severity: 'critical',
+  },
+  {
+    pattern: /\bnet(?:1|\.exe)?\s+(?:user|localgroup|group|accounts|share)\s/i,
+    category: 'account-management',
+    description: 'Account/share management (Windows net user/localgroup)',
+    severity: 'critical',
+  },
+
+  // Privilege & session control (#473)
+  {
+    pattern: /\b(?:u?mount|fusermount|losetup|swapon|swapoff|dmsetup|cryptsetup|mdadm)\s+[^|;&]/,
+    category: 'disk-operation',
+    description: 'Mount/attach filesystems and devices',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:insmod|modprobe|rmmod|depmod)\s+/,
+    category: 'kernel-module',
+    description: 'Load/remove kernel modules',
+    severity: 'critical',
+  },
+  {
+    pattern: /\b(?:shutdown|reboot|halt|poweroff|telinit|kexec)\b|\binit\s+[0-6]\b|\bloginctl\s+(?:terminate|kill|lock|poweroff|reboot|suspend|hibernate)/,
+    category: 'power-session',
+    description: 'Power/session control (shutdown/reboot/...)',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:chroot|nsenter|unshare|setpriv|capsh)\s+/,
+    category: 'namespace-escape',
+    description: 'Container/namespace boundary tools',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bpkill\s+/,
+    category: 'process-kill',
+    description: 'Kill processes by name (pkill)',
+    severity: 'medium',
   },
 
   // Disk Operations - HIGH
@@ -132,6 +246,179 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     severity: 'high',
   },
 
+  // Shell indirection & interpreter one-liners (#473) — the command under
+  // audit is just a launcher; the payload is invisible to the denylist.
+  {
+    pattern: /\b(?:python[0-9.]*|pythonw|pypy[0-9.]*)\s+[^;&|]*?-\w*c\b/,
+    category: 'interpreter-exec',
+    description: 'Inline code execution (python -c)',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:node|nodejs|bun)\s+[^;&|]*?(?:-\w*[ep]\b|--eval\b|--print\b)/,
+    category: 'interpreter-exec',
+    description: 'Inline code execution (node -e / --eval)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bdeno\s+eval\b/,
+    category: 'interpreter-exec',
+    description: 'Inline code execution (deno eval)',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:perl|ruby)\s+[^;&|]*?-\w*e\b/,
+    category: 'interpreter-exec',
+    description: 'Inline code execution (perl/ruby -e)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bphp[0-9.]*\s+[^;&|]*?-\w*r\b/,
+    category: 'interpreter-exec',
+    description: 'Inline code execution (php -r)',
+    severity: 'high',
+  },
+  {
+    pattern: /\blua[0-9.]*\s+[^;&|]*?-\w*e\b/,
+    category: 'interpreter-exec',
+    description: 'Inline code execution (lua -e)',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:python[0-9.]*|pypy[0-9.]*|node(?:js)?|perl|ruby|php|lua[0-9.]*|bash|sh|zsh|fish|dash|ksh)\s+-?\s*<<-?\s*['"]?\w/,
+    category: 'interpreter-exec',
+    description: 'Script fed to an interpreter via heredoc',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:bash|zsh|fish|dash|ksh|sh)\s+[^;&|]*?-\w*c\b/,
+    category: 'shell-indirection',
+    description: 'Inline shell execution (sh -c / bash -lc)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bcmd(?:\.exe)?\s+\/\s*[ck]\b/i,
+    category: 'shell-indirection',
+    description: 'cmd /c inline execution (Windows)',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+[^;&|]*?-(?:c|command|e[cn]|enc|encodedcommand|ep|exp|executionpolicy)\b/i,
+    category: 'shell-indirection',
+    description: 'PowerShell inline/encoded execution',
+    severity: 'high',
+  },
+  {
+    pattern: /\beval\s+\S/,
+    category: 'shell-indirection',
+    description: 'eval — executes a string as shell code',
+    severity: 'high',
+  },
+  {
+    pattern: /\bexec\s+\S/,
+    category: 'shell-indirection',
+    description: 'exec — replaces the shell / launches a program',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bsource\s+\S/,
+    category: 'shell-indirection',
+    description: 'source — executes a file in the current shell',
+    severity: 'medium',
+  },
+  {
+    pattern: /(?:^|[;&|({]\s*)\.\s+\S/,
+    category: 'shell-indirection',
+    description: '". file" — sources a file in the current shell',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bxargs\s+\S/,
+    category: 'shell-indirection',
+    description: 'xargs — builds and runs commands from piped input',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bfind\s[^;&|]*?-exec(?:dir)?\b/,
+    category: 'shell-indirection',
+    description: 'find -exec runs a command per match',
+    severity: 'high',
+  },
+  {
+    pattern: new RegExp(`\\|\\s*(?:sudo\\s+)?${INTERPRETERS}\\b`),
+    category: 'shell-indirection',
+    description: 'Pipe output into an interpreter/shell',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:rundll32|regsvr32|mshta|cscript|wscript|wmic|msiexec|installutil|regsvcs|msbuild|hh)\s/i,
+    category: 'windows-proxy-exec',
+    description: 'Windows proxy/script execution (LOLBIN)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bcertutil\s+[^;&|]*?-(?:en|de)code/i,
+    category: 'shell-indirection',
+    description: 'certutil encode/decode (payload staging)',
+    severity: 'medium',
+  },
+
+  // Exfiltration (#473) — channels that move data off the machine.
+  {
+    pattern: /\b(?:scp|sftp|rsync|ftp|tftp|lftp|ncftp|smbclient)\s+/,
+    category: 'exfiltration',
+    description: 'Remote file transfer (data can leave the machine)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bssh\s+\S/,
+    category: 'exfiltration',
+    description: 'SSH remote shell/tunnel (data can leave the machine)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bcurl\s[^;&|]*?(?:-d\b|--data\b|--data-urlencode\b|-T\b|--upload-file\b|-F\b|--form\b|--json\b|-X\s*(?:POST|PUT|PATCH|DELETE|post|put|patch|delete)\b|--request\s+(?:POST|PUT|PATCH|DELETE|post|put|patch|delete)\b)/,
+    category: 'exfiltration',
+    description: 'curl upload/POST — sends data out',
+    severity: 'high',
+  },
+  {
+    pattern: /\bwget\s[^;&|]*?--(?:post-data|post-file|body-data|body-file|method=(?:POST|post|PUT|put|PATCH|patch|DELETE|delete))/,
+    category: 'exfiltration',
+    description: 'wget upload/POST — sends data out',
+    severity: 'high',
+  },
+  {
+    pattern: /(?:\b(?:nc|ncat|netcat|socat)\s[^;&|]*<|\|\s*(?:nc|ncat|netcat|socat)\s)/,
+    category: 'exfiltration',
+    description: 'netcat/socat moving data over the network',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:rclone\s+(?:copy|move|sync|copyto|moveto|cat|serve|lsd)|aws\s+s3\s+(?:cp|sync|mv|presign)|aws\s+s3api\s+(?:put-object|copy-object|get-object)|gsutil\s+(?:cp|mv|rsync)|gcloud\s+storage\s+(?:cp|mv|rsync|upload)|azcopy\s+(?:copy|sync)|az\s+storage\s+\S+\s+(?:upload|download|copy))/i,
+    category: 'exfiltration',
+    description: 'Cloud storage transfer (data can leave the machine)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bbitsadmin\s+\/(?:transfer|create|add|set)/i,
+    category: 'exfiltration',
+    description: 'BITS file transfer (Windows)',
+    severity: 'high',
+  },
+  {
+    pattern: /\bgit\s+(?:-[cC]\s+\S+\s+|--git-dir=\S+\s+)*push\s+(?:(?:-[A-Za-z]+|--[a-zA-Z][\w-]*(?:=\S+)?)\s+)*(?!origin\b|-)\S/,
+    category: 'exfiltration',
+    description: 'git push to a non-origin remote — code can leave the machine',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:npm|pnpm|yarn|bun|cargo)\s+publish\b|\btwine\s+upload\b|\bgem\s+push\b|\bhelm\s+(?:push|chart\s+push)\b|\b(?:mvn|gradle)\s+(?:deploy|publish|uploadArchives)\b|\b(?:docker|podman|skopeo|crane|buildah)\s+push\b|\bskopeo\s+copy\b/,
+    category: 'registry-publish',
+    description: 'Publish/push code or images to a registry (exfiltration)',
+    severity: 'high',
+  },
+
   // System Configuration - HIGH
   {
     pattern: /\bchmod\s+[0-7]*[246][0-7]*/,
@@ -146,21 +433,53 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     severity: 'high',
   },
   {
-    pattern: /\bcrontab\s+-/,
+    pattern: /\bcrontab\s+(?!-l\b)/,
     category: 'system-config',
-    description: 'Modify scheduled tasks',
+    description: 'Modify scheduled tasks (persistence)',
     severity: 'high',
   },
   {
-    pattern: /\bsystemctl\s+(enable|disable|stop|start)/,
+    pattern: /\bsystemctl\s+(?:enable|disable|mask|stop|start|restart|kill|isolate|edit|reboot|poweroff|halt|suspend|hibernate|kexec|soft-reboot|daemon-reexec)\b/,
     category: 'system-config',
-    description: 'Modify system services',
+    description: 'Modify system services / power state',
     severity: 'high',
   },
   {
     pattern: /\bservice\s+/,
     category: 'system-config',
     description: 'Control system services',
+    severity: 'high',
+  },
+
+  // Persistence (#473) — install hooks/keys/jobs that survive the session.
+  {
+    pattern: /\bssh-copy-id\b/,
+    category: 'persistence',
+    description: 'Installs an SSH key in remote authorized_keys',
+    severity: 'high',
+  },
+  {
+    pattern: /\bat\s+(?:now\b|noon\b|midnight\b|teatime\b|\+|\d|-[fqtv]\b)|\batrm\s+/,
+    category: 'persistence',
+    description: 'at — schedules a command for later execution',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bgit\s+(?:-[cC]\s+\S+\s+|--git-dir=\S+\s+)*config\s+[^;&|]*?(?:--global\b|--system\b|core\.(?:hooksPath|pager|sshCommand|editor|fsmonitor)|alias\.|include(?:If)?\.)/,
+    category: 'persistence',
+    description: 'Modify git config — hooksPath/alias/global can run code',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:schtasks\s+\/(?:create|change|delete)|sc(?:\.exe)?\s+(?:create|config|delete|failure)|reg(?:\.exe)?\s+(?:add|delete|import|restore)|bcdedit\b|diskpart\b)/i,
+    category: 'persistence',
+    description: 'Windows persistence/system modification',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:takeown|icacls)\s+/i,
+    category: 'permissions-change',
+    description: 'Take ownership / rewrite ACLs (Windows)',
     severity: 'high',
   },
 
@@ -187,6 +506,63 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     pattern: /\bpip\s+uninstall/,
     category: 'package-removal',
     description: 'Uninstall Python packages',
+    severity: 'medium',
+  },
+
+  // Package installs & runners (#473) — postinstall/lifecycle hooks execute
+  // fetched code; npx/bunx-style runners download and execute in one step.
+  {
+    pattern: /\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci|add|dlx|exec|create|init|update|upgrade|rebuild)\b/,
+    category: 'package-exec',
+    description: 'Package install/exec — lifecycle/postinstall code runs',
+    severity: 'medium',
+  },
+  {
+    pattern: /\byarn\s*(?:$|[;&|>])/,
+    category: 'package-exec',
+    description: 'Bare yarn == install (postinstall code)',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:npx|bunx|uvx)\s+\S/,
+    category: 'package-exec',
+    description: 'Download-and-execute package runner (npx/bunx/uvx)',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bpip[0-9.]*\s+(?:install|wheel|download)\b|\bpipx\s+(?:install|run)\b/,
+    category: 'package-exec',
+    description: 'Python package fetch/install — runs build hooks',
+    severity: 'medium',
+  },
+  {
+    pattern: /\buv\s+(?:pip\s+install|install|add|sync|run|tool\s+(?:install|run))\b|\b(?:poetry|pipenv|conda|mamba|hatch)\s+(?:install|add|sync)\b/,
+    category: 'package-exec',
+    description: 'Python env/package install or run — code executes',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:gem|composer|brew|port|guix)\s+(?:install|add|require|update|upgrade)\b|\bcargo\s+(?:install|fetch)\b|\bcpanm?\s+\S|\bgo\s+(?:install|generate)\b/,
+    category: 'package-exec',
+    description: 'Package install — fetched code executes during install',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:apt|apt-get|aptitude)\s+(?:install|upgrade|dist-upgrade|full-upgrade|reinstall|remove|purge|autoremove)\b/,
+    category: 'package-exec',
+    description: 'OS package install/remove — maintainer scripts run as root',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:dnf|yum|zypper|apk|pkg|snap|flatpak)\s+(?:install|add|upgrade|update|dist-upgrade|reinstall|remove|del|erase)\b|\bpacman\s+-(?:S(?:yu?)?|U|R|D)\b|\b(?:dpkg|rpm)\s+-\w*[iUeRr]/,
+    category: 'package-exec',
+    description: 'OS package install/remove — maintainer scripts run as root',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bmake\s+(?:install|uninstall)\b|\bcmake\s+--install\b/,
+    category: 'package-exec',
+    description: 'make/cmake install — runs install scripts into system dirs',
     severity: 'medium',
   },
 
@@ -228,6 +604,88 @@ export const DANGEROUS_COMMANDS: DangerousPattern[] = [
     category: 'system-file-overwrite',
     description: 'Overwrite Windows system files',
     severity: 'high',
+  },
+
+  // Sensitive-destination writes (#473) — mv/cp/ln/install, redirects, tee,
+  // in-place edits and dd pointed at credentials, rc files, /etc or the
+  // agent's own config. Distinguishing source from destination args is out
+  // of scope: any mv/cp touching a sensitive path is flagged.
+  {
+    pattern: new RegExp(`\\b(?:mv|cp|ln|install)\\s[^;&|]*?${SENSITIVE_WRITE_PATH}`),
+    category: 'sensitive-file-write',
+    description: 'Copy/move/link into a sensitive path (overwrite/persistence)',
+    severity: 'high',
+  },
+  {
+    pattern: new RegExp(`(?:>{1,2}|>\\|)\\s*[^;&|]*?${SENSITIVE_WRITE_PATH}`),
+    category: 'sensitive-file-write',
+    description: 'Redirect output into a sensitive file (overwrite/persistence)',
+    severity: 'high',
+  },
+  {
+    pattern: new RegExp(`\\btee\\s[^;&|]*?${SENSITIVE_WRITE_PATH}`),
+    category: 'sensitive-file-write',
+    description: 'tee into a sensitive file',
+    severity: 'high',
+  },
+  {
+    pattern: new RegExp(`\\b(?:sed|perl|awk|gsed)\\s[^;&|]*?-\\w*i\\b[^;&|]*?${SENSITIVE_WRITE_PATH}`),
+    category: 'sensitive-file-write',
+    description: 'In-place edit of a sensitive file',
+    severity: 'high',
+  },
+  {
+    pattern: new RegExp(`\\bdd\\s[^;&|]*?of=\\s*${SENSITIVE_WRITE_PATH}`),
+    category: 'sensitive-file-write',
+    description: 'dd overwrite of a sensitive file',
+    severity: 'critical',
+  },
+
+  // Secret disclosure (#473) — env dumps, credential-file reads, secret
+  // stores and packet capture. The child-env scrub already strips
+  // credential-shaped vars from spawned commands; these tripwires catch
+  // what remains (user env, on-disk keys, agent config).
+  {
+    pattern: /\bprintenv\b/,
+    category: 'secret-disclosure',
+    description: 'Dump environment variables (may expose secrets)',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:env|set|export|declare|typeset|history)\s*(?:$|[;&|>])/,
+    category: 'secret-disclosure',
+    description: 'Dump shell/environment state (may expose secrets)',
+    severity: 'medium',
+  },
+  {
+    pattern: /\b(?:export|declare|typeset)\s+-p\b|\bcompgen\s+-[a-zA-Z]*[ev]\b/,
+    category: 'secret-disclosure',
+    description: 'Dump exported variables/functions',
+    severity: 'medium',
+  },
+  {
+    pattern: /\bssh-add\s+-[lL]\b/,
+    category: 'secret-disclosure',
+    description: 'List SSH identities loaded in the agent',
+    severity: 'medium',
+  },
+  {
+    pattern: new RegExp(`\\b${READERS}\\b[^;&|]*?${SENSITIVE_PATH}|\\bgpg\\s+--export-secret`),
+    category: 'secret-disclosure',
+    description: 'Read credential/config/key material',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:secret-tool\s+\w|security\s+[^;&|]*?find-(?:generic|internet)-password|cmdkey\s+\/(?:list|generic)|keyctl\s+(?:read|print|show|dump)|op\s+(?:read|item\s+get|inject)|bw\s+(?:get|list|export)\b|vault\s+(?:read|kv\s+get|kv\s+list)|consul\s+kv\s+get|etcdctl\s+get|kubectl\s+(?:get|describe)\s+secrets?\b)/i,
+    category: 'secret-disclosure',
+    description: 'Read a secret store / keychain / cluster secrets',
+    severity: 'high',
+  },
+  {
+    pattern: /\b(?:tcpdump|tshark|dumpcap|ngrep)\s+/,
+    category: 'secret-disclosure',
+    description: 'Packet capture — can harvest credentials',
+    severity: 'medium',
   },
 
   // Database Operations - HIGH

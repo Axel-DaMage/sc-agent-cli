@@ -153,7 +153,7 @@ Let me check the files in the current directory...
 
 ? Allow this action? › - Use arrow-keys. Return to submit.
 ❯   Yes (once) - Allow this time only
-    Always (save to config) - Auto-approve forever
+    Always (this session only) - Mutating tool — never saved to global config
     Session (until exit) - Auto-approve this session
     No (deny) - Deny this action
 ```
@@ -162,6 +162,7 @@ Let me check the files in the current directory...
 ✅ Four clear options  
 ✅ Default to "Yes (once)"  
 ✅ Session and Always options prevent repetition  
+✅ "Always" is capped at session scope for mutating tools  
 
 ---
 
@@ -280,10 +281,12 @@ When the agent needs permission, you now get **4 choices**:
    - Safest option
    - No permanent changes
 
-2. **Always (save to config)**
-   - Auto-approve this tool forever
-   - Saves to `~/.sc-agent/config.json`
-   - Never ask again (even in future sessions)
+2. **Always**
+   - Non-mutating tools: **"Always (save to config)"** — auto-approve this
+     tool forever, saved to `~/.sc-agent/config.json`
+   - Mutating tools (`run_shell`, `git`, `memory_write`, `write_file`,
+     `edit_file`): **"Always (this session only)"** — capped at session
+     scope, never written to the global config
 
 3. **Session (until exit)**
    - Auto-approve for this chat session
@@ -298,7 +301,8 @@ When the agent needs permission, you now get **4 choices**:
 
 - **Default selection**: "Yes (once)"
 - **No typing required**: Just press Enter to approve once
-- **Smart saving**: "Always" updates config automatically
+- **Smart saving**: "Always" updates config automatically for non-mutating
+  tools; for mutating tools it stays session-scoped
 
 ### Example Flow
 
@@ -310,7 +314,7 @@ When the agent needs permission, you now get **4 choices**:
 
 ? Allow this action?
 ❯   Yes (once) - Allow this time only           ← Press Enter
-    Always (save to config) - Auto-approve forever
+    Always (this session only) - Mutating tool — never saved to global config
     Session (until exit) - Auto-approve this session
     No (deny) - Deny this action
 
@@ -319,7 +323,8 @@ When the agent needs permission, you now get **4 choices**:
 
 ### Configuration Impact
 
-When you choose **Always**, it modifies `~/.sc-agent/config.json`:
+When you choose **Always** on a non-mutating tool, it modifies
+`~/.sc-agent/config.json`:
 
 ```json
 {
@@ -328,11 +333,16 @@ When you choose **Always**, it modifies `~/.sc-agent/config.json`:
       "read_file",
       "list_dir",
       "search_text",
-      "run_shell"  ← Added automatically
+      "web_fetch"  ← Added automatically
     ]
   }
 }
 ```
+
+Mutating tools (`run_shell`, `git`, `memory_write`, `write_file`,
+`edit_file`) are never added by "Always" — the grant expires with the
+session so an approval in one repository cannot auto-approve mutations
+everywhere else.
 
 ---
 

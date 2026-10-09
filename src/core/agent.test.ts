@@ -1,6 +1,9 @@
 import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { pruneMessageHistory, limitMessageHistory, Agent } from './agent.js';
+import { resolveRole, resolveRolePipeline, phasePolicy, runRolePipeline } from './roles.js';
+import { writeFileTool } from '../tools/write-file.js';
+import { estimateTokens } from '../utils/token-tracker.js';
 import type { Message } from './types.js';
 
 test('Agent.run forwards configured non-streaming mode to the provider', async () => {
@@ -105,7 +108,9 @@ test('Agent.run self-heals when model outputs future intention in autoApprove mo
       // Long response with future intention (not conversational) should trigger self-heal
       return { content: 'I need to investigate the build errors in your project. I will list the files in this directory first and then check the configuration to diagnose the compilation issues.' };
     }
-    return { content: 'Task completed!' };
+    // Explicit no-changes verdict ends the turn cleanly — the #448
+    // zero-mutation guard honors it instead of re-prompting forever.
+    return { content: 'No changes required — the build already passes cleanly.' };
   });
 
   const result = await agent.run('Fix the build errors');
@@ -217,4 +222,646 @@ test('Agent.run recovers after a single empty response', async () => {
   assert.equal(callCount, 2);
   assert.ok(result.some(m => m.role === 'assistant' && m.content === 'Task completed successfully!'));
   mock.mockRestore();
+});
+
+// --- Zero-mutation completion guard (#448) ---
+// Failure signature scc:zero-mutations:auto/best-coding: in unattended runs
+// the model completed its turn with a prose answer and zero mutating tool
+// calls, so the wrapper had nothing to commit. The guard must re-prompt.
+
+test('Agent.run re-prompts a zero-mutation turn completion on a mutation-scoped prompt (#448)', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'auto/best-coding',
+      }
+    }
+  });
+
+  // Mock the mutating tool so nothing touches the real worktree.
+  const { writeFileTool } = await import('../tools/write-file.js');
+  const writeSpy = vi.spyOn(writeFileTool, 'execute').mockResolvedValue('ok');
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      // The #448 failure shape: prose narration of the fix, no tool calls.
+      return { content: 'The parser is missing a null check on the token stream. The right approach is a guard clause at the top of parseToken before accessing token.value.' };
+    }
+    if (callCount === 2) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'w1',
+          type: 'function' as const,
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'parser.ts', content: 'x' }) },
+        }],
+      };
+    }
+    return { content: 'The fix has been applied and the parser is patched.' };
+  });
+
+  const result = await agent.run('Fix the null check in parser.ts');
+
+  assert.equal(callCount, 3);
+  assert.equal(writeSpy.mock.calls.length, 1);
+  const reprompts = result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION'));
+  assert.equal(reprompts.length, 1);
+  assert.match(reprompts[0].content, /apply it now using the tools/i);
+
+  mock.mockRestore();
+  writeSpy.mockRestore();
+});
+
+test('Agent.run caps zero-mutation re-prompts and still completes cleanly', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    livelockThreshold: 0, // disable livelock abort so the reprompt cap is the limiter
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'auto/best-coding',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'Here is a detailed narrative about the codebase structure and how the pieces fit together for the reader.' };
+  });
+
+  const result = await agent.run('Implement the new config option');
+
+  // 1 initial turn + 2 re-prompts (default SC_ZERO_MUTATION_REPROMPTS budget)
+  assert.equal(callCount, 3);
+  assert.equal(result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')).length, 2);
+  mock.mockRestore();
+});
+
+test('Agent.run does not re-prompt zero-mutation turns for read-only prompts', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'This project is a provider-agnostic CLI agent with parallel tool use.' };
+  });
+
+  const result = await agent.run('Summarize what this project does');
+
+  assert.equal(callCount, 1);
+  assert.ok(!result.some(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')));
+  mock.mockRestore();
+});
+
+test('Agent.run does not re-prompt zero-mutation turns in interactive mode', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'The bug sits in the tokenizer where the offset drifts after each consumed chunk.' };
+  });
+
+  const result = await agent.run('Fix the parser bug');
+
+  assert.equal(callCount, 1);
+  assert.ok(!result.some(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')));
+  mock.mockRestore();
+});
+
+test('Agent.run honors an explicit no-changes verdict without re-prompting', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    return { content: 'I inspected the relevant code paths and no changes are required — the guard already exists.' };
+  });
+
+  const result = await agent.run('Fix issue #448 in the engine');
+
+  assert.equal(callCount, 1);
+  assert.ok(!result.some(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')));
+  mock.mockRestore();
+});
+
+test('Agent.run does not count memory_write as a workspace mutation for the guard', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  // Mock the memory store so nothing touches ~/.sc-agent on disk.
+  const { memoryWriteTool } = await import('../tools/memory-tools.js');
+  const memSpy = vi.spyOn(memoryWriteTool, 'execute').mockResolvedValue('saved');
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'm1',
+          type: 'function' as const,
+          function: { name: 'memory_write', arguments: JSON.stringify({ key: 'note', content: 'v' }) },
+        }],
+      };
+    }
+    if (callCount === 2) {
+      return { content: 'Recorded the preference for later sessions.' };
+    }
+    return { content: 'No changes required — only a note was stored.' };
+  });
+
+  const result = await agent.run('Update the stored user preference');
+
+  // memory_write alone does not satisfy the workspace-mutation guard —
+  // the turn is re-prompted once, then the verdict ends it.
+  assert.equal(callCount, 3);
+  assert.equal(result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION')).length, 1);
+
+  mock.mockRestore();
+  memSpy.mockRestore();
+});
+
+test('Agent.run: a #464-refused run_shell git mutation does not satisfy the zero-mutation guard (#485)', async () => {
+  const agent = new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      }
+    }
+  });
+
+  const writeSpy = vi.spyOn(writeFileTool, 'execute').mockResolvedValue('ok');
+
+  let callCount = 0;
+  const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      // The model tries to revert files via run_shell — refused by the
+      // unattended git guard (#464) before it can touch the worktree.
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'g1',
+          type: 'function' as const,
+          function: { name: 'run_shell', arguments: JSON.stringify({ command: 'git checkout -- .' }) },
+        }],
+      };
+    }
+    if (callCount === 2) {
+      // Neutral acknowledgement prose: no future-intention phrasing (would
+      // trip self-heal instead), no no-changes verdict.
+      return { content: 'The git mutation was refused by the permission gate.' };
+    }
+    if (callCount === 3) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'w1',
+          type: 'function' as const,
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'x.ts', content: 'y' }) },
+        }],
+      };
+    }
+    return { content: 'Done.' };
+  });
+
+  const result = await agent.run('Fix the parser bug');
+
+  // The refusal surfaces as a tool-result error carrying the guard message.
+  const refused = result.find(m => m.role === 'tool' && m.tool_call_id === 'g1');
+  assert.ok(refused, 'expected a tool result for the refused run_shell call');
+  assert.match(refused!.content, /refused in unattended mode/);
+
+  // A refused call is a failure, not a mutation — the #448 guard still
+  // re-prompts once, then the write_file call satisfies it.
+  const reprompts = result.filter(m => m.role === 'user' && m.content.includes('ZERO-MUTATION'));
+  assert.equal(reprompts.length, 1);
+  assert.equal(writeSpy.mock.calls.length, 1);
+  assert.equal(callCount, 4);
+
+  mock.mockRestore();
+  writeSpy.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// Multi-model orchestration (#424) — phase lifecycle
+// ---------------------------------------------------------------------------
+
+function makeAgent(): Agent {
+  return new Agent({
+    workspaceRoot: process.cwd(),
+    autoApprove: true,
+    quiet: true,
+    config: {
+      model: {
+        provider: 'openai-compatible',
+        baseUrl: 'http://test.api/v1',
+        model: 'test-model',
+      },
+      roles: { executor: 'openai/gpt-4o-mini' },
+    },
+  });
+}
+
+test('Agent.run records a phase segment and scopes tokens to the role (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'executor');
+  assert.equal(res.fallback, false);
+  assert.equal(res.candidate.id, 'openai/gpt-4o-mini');
+
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({
+    content: 'Applied the change.',
+    usage: { prompt_tokens: 500, completion_tokens: 40, total_tokens: 540 },
+  }));
+
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('executor') });
+
+  const phases = agent.getPhases();
+  assert.deepEqual(phases, [{ role: 'executor', provider: 'openai', model: 'gpt-4o-mini', iterations: 1 }]);
+  assert.deepEqual(agent.getRoleFallbacks(), []);
+
+  const roleUsage = agent.tokenTracker.getRoleUsage();
+  // Provider-reported usage supersedes the chars/4 estimate (#424).
+  assert.equal(roleUsage.executor.in, 500);
+  assert.equal(roleUsage.executor.out, 40);
+  assert.deepEqual(agent.tokenTracker.getUsage(), { inputTokens: 500, outputTokens: 40, totalTokens: 540 });
+});
+
+test('Agent.run fallback roles keep the default model and record role_fallback (#424)', async () => {
+  const agent = makeAgent();
+  // No planner mapping in makeAgent's config.roles → fallback to default.
+  const res = resolveRole(agent.options.config, 'planner');
+  assert.equal(res.fallback, true);
+
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: '1. inspect\n2. edit\n3. verify' }));
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.deepEqual(agent.getRoleFallbacks(), ['planner']);
+  const phases = agent.getPhases();
+  assert.equal(phases.length, 1);
+  assert.equal(phases[0].role, 'planner');
+  assert.equal(phases[0].model, 'test-model'); // default model served
+  assert.equal(phases[0].provider, 'custom');
+});
+
+test('Agent.run read-only phases hide mutating tools from the schema (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'planner');
+
+  let seenToolNames: string[] = [];
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async (options) => {
+    seenToolNames = (options.tools ?? []).map(t => t.function.name);
+    return { content: 'plan' };
+  });
+
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.ok(!seenToolNames.includes('write_file'));
+  assert.ok(!seenToolNames.includes('edit_file'));
+  assert.ok(!seenToolNames.includes('memory_write'));
+  assert.ok(seenToolNames.includes('read_file'));
+  // Dual-purpose tools stay — the dispatch gate covers them.
+  assert.ok(seenToolNames.includes('run_shell'));
+  assert.ok(seenToolNames.includes('git'));
+});
+
+test('Agent.run read-only phase denies a mutating call at dispatch (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'planner');
+  const writeSpy = vi.spyOn(writeFileTool, 'execute').mockResolvedValue('written');
+
+  let callCount = 0;
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) {
+      // The model hallucinated a write_file call despite it being absent
+      // from the schema — the dispatch gate must reject it.
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'w1',
+          type: 'function' as const,
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'x.txt', content: 'y' }) },
+        }],
+      };
+    }
+    return { content: 'Plan: do not write — step sequence follows.' };
+  });
+
+  const result = await agent.run('task', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.equal(writeSpy.mock.calls.length, 0);
+  const denial = result.find(m => m.role === 'tool' && m.content.startsWith('Error: Tool call denied:'));
+  assert.ok(denial, 'expected a read-only phase denial tool result');
+  assert.ok(denial!.content.includes('write_file'));
+
+  writeSpy.mockRestore();
+});
+
+test('Agent.run suppresses self-heal/livelock guards in prose phases (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'planner');
+
+  let callCount = 0;
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+    callCount++;
+    // Future-intention prose would normally trigger the self-heal re-prompt
+    // in autoApprove mode; planner phases must end on it instead.
+    return { content: 'I will inspect the repository layout first, then produce the step-by-step plan for the executor phase to implement the feature safely.' };
+  });
+
+  await agent.run('Fix the build errors', [], undefined, { routing: res, ...phasePolicy('planner') });
+
+  assert.equal(callCount, 1);
+});
+
+test('Agent.run restores the default failover chain after a phase (#424)', async () => {
+  const agent = makeAgent();
+  const res = resolveRole(agent.options.config, 'executor');
+
+  vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: 'done' }));
+  await agent.run('task', [], undefined, { routing: res, ...phasePolicy('executor') });
+
+  // Back on the default chain: single candidate = configured model.
+  assert.equal(agent.getPhases().length, 1);
+  const res2 = resolveRole(agent.options.config, 'planner');
+  await agent.run('plan task', [], undefined, { routing: res2, ...phasePolicy('planner') });
+  assert.equal(agent.getPhases().length, 2);
+});
+
+// --- Reviewer/judge consensus loop (#462) ---
+
+test('runRolePipeline drives request_changes → executor rework → re-review and scopes reviewer tokens (#462)', async () => {
+  const prev = process.env.SC_ZERO_MUTATION_REPROMPTS;
+  // The scripted executor answers in prose — disable the zero-mutation
+  // re-prompt budget so phase calls map 1:1 onto the scripted replies.
+  process.env.SC_ZERO_MUTATION_REPROMPTS = '0';
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      autoApprove: true,
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        },
+        roles: { executor: 'openai/gpt-4o-mini', reviewer: 'anthropic/claude-sonnet-4-6' },
+      },
+    });
+    const replies = [
+      '1. inspect\n2. edit\n3. verify',                              // planner (default-model fallback)
+      'implemented the fix',                                         // executor
+      'defects: missing test coverage\nVERDICT: request_changes',    // reviewer
+      'added the missing coverage',                                  // executor rework round
+      'VERDICT: approve',                                            // re-review
+    ];
+    vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: replies.shift() ?? 'done' }));
+
+    const res = await runRolePipeline(agent, resolveRolePipeline(agent.options.config), 'implement the fix');
+
+    assert.equal(res.decision?.verdict, 'approve');
+    assert.equal(res.fixRounds, 1);
+    // The append-only segment log records each rework + re-review segment.
+    assert.deepEqual(
+      agent.getPhases().map(p => p.role),
+      ['planner', 'executor', 'reviewer', 'executor', 'reviewer'],
+    );
+    // Per-role token accounting feeds the manifest's tokens.byRole.
+    const byRole = agent.tokenTracker.getRoleUsage();
+    for (const role of ['planner', 'executor', 'reviewer'] as const) {
+      assert.ok(byRole[role], `expected ${role} role token usage`);
+      assert.ok(byRole[role]!.in > 0 && byRole[role]!.out > 0, `${role} usage must be non-zero`);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.SC_ZERO_MUTATION_REPROMPTS;
+    else process.env.SC_ZERO_MUTATION_REPROMPTS = prev;
+  }
+});
+
+test('runRolePipeline warns once when the reviewer resolves to the executor provider+model (#462)', async () => {
+  const prev = process.env.SC_ZERO_MUTATION_REPROMPTS;
+  process.env.SC_ZERO_MUTATION_REPROMPTS = '0';
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      autoApprove: true,
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        },
+        roles: { executor: 'openai/gpt-4o', reviewer: 'openai/gpt-4o' },
+      },
+    });
+    const replies = [
+      'plan',
+      'implemented',
+      'VERDICT: approve',
+    ];
+    vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: replies.shift() ?? 'done' }));
+
+    const warns: string[] = [];
+    await runRolePipeline(agent, resolveRolePipeline(agent.options.config), 'task', [], {
+      warn: l => warns.push(l),
+    });
+
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /same provider\+model/);
+  } finally {
+    if (prev === undefined) delete process.env.SC_ZERO_MUTATION_REPROMPTS;
+    else process.env.SC_ZERO_MUTATION_REPROMPTS = prev;
+  }
+});
+
+// --- Context-spend accounting + injection budget guard (#422) ---
+
+test('Agent.run enforces SC_CONTEXT_BUDGET_TOKENS and exposes per-source spend', async () => {
+  const prev = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  process.env.SC_CONTEXT_BUDGET_TOKENS = '300';
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        }
+      }
+    });
+    const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: 'ok' }));
+    const result = await agent.run('test');
+    mock.mockRestore();
+
+    const report = agent.getContextBudget();
+    assert.ok(report, 'expected a context budget report after injection');
+    assert.equal(report.budget_tokens, 300);
+    assert.equal(report.over_budget, true);
+    assert.ok(report.injected_tokens <= report.requested_tokens);
+    for (const s of report.sources) {
+      assert.ok(s.tokens_injected <= s.tokens_requested, `${s.source} injected must not exceed requested`);
+    }
+
+    // The system prompt is trimmed last — it still lands in history with
+    // the visible trim marker (never silent).
+    const sys = result.find(m => m.role === 'system');
+    assert.ok(sys);
+    assert.match(sys.content, /context source "system" trimmed/);
+    assert.ok(estimateTokens(sys.content) <= 400);
+  } finally {
+    if (prev === undefined) delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+    else process.env.SC_CONTEXT_BUDGET_TOKENS = prev;
+  }
+});
+
+test('Agent.run records per-source context spend without a cap configured', async () => {
+  const prev = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        }
+      }
+    });
+    const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => ({ content: 'ok' }));
+    const result = await agent.run('test');
+    mock.mockRestore();
+
+    const report = agent.getContextBudget();
+    assert.ok(report, 'expected a context budget report after injection');
+    assert.equal(report.budget_tokens, null);
+    assert.equal(report.over_budget, false);
+    assert.equal(report.injected_tokens, report.requested_tokens);
+    assert.ok(report.sources.some(s => s.source === 'system'));
+    assert.ok(report.sources.every(s => !s.truncated && !s.dropped));
+
+    const sys = result.find(m => m.role === 'system');
+    assert.ok(sys && sys.content.includes('helpful AI assistant'), 'system prompt passes through untrimmed');
+  } finally {
+    if (prev === undefined) delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+    else process.env.SC_CONTEXT_BUDGET_TOKENS = prev;
+  }
+});
+
+test('Agent.run accounts tool output context spend in the budget report', async () => {
+  const prev = process.env.SC_CONTEXT_BUDGET_TOKENS;
+  delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+  try {
+    const agent = new Agent({
+      workspaceRoot: process.cwd(),
+      quiet: true,
+      config: {
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://test.api/v1',
+          model: 'test-model',
+        }
+      }
+    });
+
+    const { readFileTool } = await import('../tools/read-file.js');
+    const readSpy = vi.spyOn(readFileTool, 'execute').mockResolvedValue('x'.repeat(400));
+
+    let callCount = 0;
+    const mock = vi.spyOn(agent.provider, 'chatCompletion').mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          content: '',
+          tool_calls: [{
+            id: 'r1',
+            type: 'function' as const,
+            function: { name: 'read_file', arguments: JSON.stringify({ path: 'x.ts' }) },
+          }],
+        };
+      }
+      return { content: 'Done.' };
+    });
+
+    await agent.run('test');
+
+    const toolOut = agent.getContextBudget()?.sources.find(s => s.source === 'tool_outputs');
+    assert.ok(toolOut, 'expected a cumulative tool_outputs spend line');
+    // 'x'.repeat(400) ≈ 100 est. tokens; injected ≥ requested (synthesis nudge appended).
+    assert.ok(toolOut.tokens_requested >= 100);
+    assert.ok(toolOut.tokens_injected >= toolOut.tokens_requested);
+    assert.equal(toolOut.dropped, false);
+
+    mock.mockRestore();
+    readSpy.mockRestore();
+  } finally {
+    if (prev === undefined) delete process.env.SC_CONTEXT_BUDGET_TOKENS;
+    else process.env.SC_CONTEXT_BUDGET_TOKENS = prev;
+  }
 });

@@ -1,0 +1,62 @@
+name: Feature request
+description: Suggest a feature or improvement for SC-Agent CLI
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. For anything beyond a small change, outlining
+        the problem first helps keep the discussion focused (see
+        [CONTRIBUTING.md](https://github.com/os-santiago/sc-agent-cli/blob/main/CONTRIBUTING.md)).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the limitation, friction, or use case this feature addresses.
+      placeholder: When I try to ..., I currently have to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to happen — UX, command shape, config keys, or environment variables if relevant.
+      placeholder: e.g. A new `sc ...` command / a `SC_...` env var that ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or existing workarounds you evaluated, and why they fall short.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the CLI does this mostly affect?
+      options:
+        - Agent loop / orchestration
+        - Tools (file ops, shell, git, web fetch, memory)
+        - Permissions / sandbox / security
+        - Config / profiles / providers
+        - Interactive UX / status bar
+        - Headless / non-interactive mode
+        - Documentation
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mock output, links to related issues, prior art in other tools, etc.
+    validations:
+      required: false

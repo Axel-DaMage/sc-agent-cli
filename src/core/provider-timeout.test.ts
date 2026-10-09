@@ -1,8 +1,15 @@
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { OpenAICompatibleProvider } from './provider.js';
+
+// Real failover classes, fake backoff — the test asserts the attempt bound,
+// not wall-clock pacing.
+vi.mock('./failover.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./failover.js')>();
+  return { ...mod, computeRetryDelay: () => 1 };
+});
 
 test.each([
   { stream: false, status: 200 },
@@ -30,7 +37,8 @@ test.each([
         watchdog = setTimeout(() => reject(new Error('Test watchdog: body deadline was not enforced')), 8000);
       }),
     ]), /abort|timed out/i);
-    assert.equal(requests, 3, 'preserve the existing two-retry limit');
+    // Failover contract (#425): 1 initial attempt + 3 retries per candidate.
+    assert.equal(requests, 4);
   } finally {
     clearTimeout(watchdog);
     server.closeAllConnections();

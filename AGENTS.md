@@ -16,11 +16,16 @@
 ### Core Components
 
 - **`src/core/types.ts`**: TypeScript type definitions (messages, tools, config)
-- **`src/core/config.ts`**: Configuration loading/saving with profile support
-- **`src/core/provider.ts`**: OpenAI-compatible API client with streaming
+- **`src/core/config.ts`**: Configuration loading/saving with profile support; workspace trust boundary (#469) — config files whose realpath resolves inside the workspace get project scope: `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`/`apiKey`, `profiles.*.baseUrl`/`apiKey`, and `permissions.autoApprove` are dropped (stderr warning per key + `config.privileged_key_blocked` audit event under `--audit-log`), `permissions.denyPaths`/`denyCommands` merge additively, and project `sandbox.*` keys that would weaken an enabled baseline are dropped
+- **`src/core/provider.ts`**: OpenAI-compatible API client with streaming + failover contract (dual timeouts, bounded retry, provider/model cascade)
+- **`src/core/failover.ts`**: Failover contract — timeout resolution, transient-error classification, backoff, SC_FAILOVER chain resolution, ProviderFailoverError
+- **`src/core/roles.ts`**: Multi-model orchestration (#424) — `planner`/`executor`/`reviewer` role routing for headless runs via `config.roles` (`provider/model` aliases), `PhaseTracker` append-only segment log, per-phase read-only policy and completion-guard suppression, `--role`/`SC_ROLE` single-phase pin; #462 adds the reviewer/judge consensus loop — `VERDICT:` marker parsing (`approve`/`request_changes`), `request_changes` → bounded executor rework (`SC_ROLE_MAX_FIXES`, default 3), one-time same-provider diversity warning, manifest `review` block
 - **`src/core/agent.ts`**: Main agent loop with parallel tool execution & memory injection
-- **`src/core/project-context.ts`**: Loads project-specific context from `AGENTS.md|CLAUDE.md`
+- **`src/core/project-context.ts`**: Loads project-specific context from `AGENTS.md|SC-AGENT.md|CLAUDE.md` (+ `settings.policyFile`)
+- **`src/core/repo-map.ts`**: Skeleton context mode (#461) — `context.mode: 'skeleton'` / `SC_CONTEXT_MODE=skeleton` injects a generated repo map (per-file symbols + import edges, ~60 lines/file cap, bounded per repo) as the `repo_map` budget source instead of whole-file `project_context`; bodies pulled on demand via `read_file`
 - **`src/core/message-validator.ts`**: Auto-corrects message sequence errors
+- **`src/core/devcontainer.ts`**: Optional `--devcontainer` execution — `devcontainer up` + `devcontainer exec` with `devcontainer_unavailable` host fallback
+- **`src/core/repo-probe/`**: Repo toolchain/command detection (`sc probe`); reports `devcontainer` + `devcontainerPath` when `.devcontainer.json`/`.devcontainer/devcontainer.json` exists
 
 ### Tools System (10 tools)
 
@@ -35,7 +40,7 @@
 - Execution tools:
   - `run-shell.ts`: Execute shell commands (requires permission)
 - **New in v0.4.0**:
-  - `web-fetch.ts`: Fetch web content (docs, APIs, GitHub). No API key needed. (auto-approved)
+  - `web-fetch.ts`: Fetch web content (docs, APIs, GitHub). No API key needed. SSRF-guarded (#470): http(s)-only, private/loopback/link-local/reserved IPs blocked on every redirect hop via `src/utils/ssrf-guard.ts` (DNS-resolved addresses checked too), 5 MiB streamed body cap, 60s timeout clamp, optional `webFetch.allowlist`/`allowPrivateHosts`/`maxBytes` config. (auto-approved)
   - `git-tool.ts`: Native git operations (status, diff, log, branch, add, commit) (requires permission)
   - `memory-tools.ts`: Persistent cross-session memory read/write (read auto-approved, write requires permission)
 
@@ -43,7 +48,7 @@
 
 - **`src/utils/permissions.ts`**: Permission request system (Traditional + Blacklist profiles)
 - **`src/utils/path-security.ts`**: Path validation and sandboxing
-- **`src/utils/memory.ts`**: Persistent cross-session memory storage (JSON file in ~/.sc-agent/memory/)
+- **`src/utils/memory.ts`**: Persistent cross-session memory storage (JSON file in ~/.sc-agent/memory/), workspace-scoped tiers (#476)
 - **`src/utils/shell-env.ts`**: Shell environment auto-detection (cmd, PowerShell, Git Bash, WSL)
 - **`src/utils/dangerous-commands.ts`**: Dangerous command detection for Blacklist profile
 - **`src/utils/autocomplete.ts`**: Tab completion for commands, tools, and file paths
@@ -52,6 +57,11 @@
 - **`src/utils/storage-guidance.ts`**: Storage usage tips
 - **`src/utils/token-tracker.ts`**: Token usage estimation and cost tracking
 - **`src/utils/checkpoint.ts`**: Execution state checkpointing for crash recovery
+- **`src/utils/secure-fs.ts`**: Owner-only persistence (#475) — `writeFileSecure[Sync]`/`appendFileSecureSync` write files 0600 (and tighten pre-existing loose files), `ensureSecureDir[Sync]` creates dirs 0700 and repairs the `~/.sc-agent` chain, `warnOnLoosePermissions` warns + repairs on load (used by `loadConfig` for the global `config.json`). POSIX-only; no-ops on Windows.
+- **`src/utils/run-manifest.ts`**: Machine-readable run manifest builder/emitter for headless batch runs (`--output-format json`, `--summary-file`, `--output-file`)
+- **`src/utils/sandbox.ts`**: Opt-in `run_shell` sandbox (#423) — `sandbox` config block, bwrap backend on Linux (mount/net namespaces, `--seccomp`), degraded egress-proxy mode elsewhere; violations surface as `[SANDBOX_VIOLATION]` tool errors + `sandbox_violation` audit events + manifest `sandbox`/`sandbox_violations` fields
+- **`src/utils/sandbox-proxy.ts`**: Loopback egress-filter proxy enforcing `sandbox.egressAllowlist` (CONNECT + HTTP forward)
+- **`src/utils/sandbox-seccomp.ts`**: cBPF denylist generator for bwrap `--seccomp` (x86_64) + `seccompProfile` blob loader
 
 ### Commands
 
@@ -87,9 +97,12 @@
 ### Memory System
 
 - Memories persist across sessions in `~/.sc-agent/memory/memory.json`
-- Agent auto-loads last 10 memories into system prompt
-- Model can call `memory_read`/`memory_write` to manage context
-- User commands: `/memory`, `/memory show <key>`, `/memory forget <key>`, `/memory clear`
+- Scoped per workspace (#476): workspace identity is `sha256(realpath(workspaceRoot)).slice(0,12)`; other workspaces' entries are quarantined from every read/write path
+- Tiers: `workspace` (default — only the owning project), `global` (opt-in shared), `legacy` (pre-scoping entries — loadable, never auto-injected)
+- Agent auto-loads last 10 memories into the system prompt (workspace entries first, global fills the remainder) with `[memory:workspace]`/`[memory:global]` provenance tags
+- Unresolvable workspace root → only `global` + `legacy` tiers load; workspace-scoped writes error out
+- Model can call `memory_read`/`memory_write` (`scope` arg, `id` alias for re-filing) to manage context
+- User commands: `/memory`, `/memory show <key>`, `/memory show --all`, `/memory move <key> --to workspace|global`, `/memory forget <key>`, `/memory clear`, `/remember [--global] <text>` — see `docs/memory.md`
 - Default tags for categorization
 
 ### Shell Environment Auto-Detection
@@ -102,9 +115,9 @@
 
 1. Built-in defaults
 2. Global config (`~/.sc-agent/config.json`)
-3. Project config (`.sc-agent.json`)
+3. Project config (`.sc-agent.json`) — restricted scope: may only restrict, never elevate (#469)
 4. Active profile overrides
-5. Environment variables (SC_API_KEY, SC_MODEL, SC_PROFILE)
+5. Environment variables (SC_API_KEY, SC_MODEL, SC_BASE_URL, SC_PROFILE; SC_CONFIG_PATH relocates the global config file itself — resolving inside the workspace demotes it to project scope)
 
 ### Permission System
 
@@ -113,6 +126,10 @@
 - Blacklist profile: only dangerous commands ask (rm, sudo, del, etc.)
 - Session tracking: "Ask once" mode remembers per session
 - User can override with `-y` flag (auto-approve all)
+- **Unattended git guard**: under `-y`/`--permissions unlimited`, `run_shell` refuses git-mutating commands (`git checkout/restore/reset/clean/stash/add/commit/push/...`) — the dedicated `git` tool owns repo state; interactive mode is unaffected (#464)
+- **Child-env scrub** (#471): `run_shell`/`mcp_validate`/MCP stdio children get an allowlisted env (`utils/env-scrub.ts` — PATH/HOME/shell basics + `run_shell.allowedEnvVars` names); credential-shaped names (`SC_*`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY*`, `*_PASSWORD`, `*_AUTH`, `*_CREDENTIALS`, `BEARER`) are stripped unconditionally. `run_shell` output is redacted for known secret values (`***`). Shipped `denyCommands` defaults block `cat .env`-style credential reads — `denyPaths` does NOT constrain `run_shell` (best-effort parity; the sandbox is the hard boundary).
+- **"Always" scope cap** (#477): the permission prompt's "Always" persists to the global config only for non-mutating tools — for `run_shell`/`git`/`memory_write`/`write_file`/`edit_file` it is capped at session scope (nothing is written to `~/.sc-agent/config.json`)
+- **External tools share the gate** (#485): `registerPluginTools` wraps every plugin module (#400) and MCP server tool (#401) `execute` with `requestPermission` — external code cannot self-gate, so autoApprove lists, `-y`, session grants and prompts apply to `mcp__*`/plugin tools exactly like built-ins
 
 ### Error Recovery & Classification
 
@@ -120,6 +137,7 @@
 - Loop detection: detects repeated errors to prevent infinite loops
 - Auto-retry with alternative approaches suggested
 - Three failed attempts → alert user
+- **Zero-mutation completion guard**: in unattended runs (`-y`/`--permissions unlimited`), a mutation-scoped prompt cannot end its turn with zero mutating tool calls — the agent re-prompts up to `SC_ZERO_MUTATION_REPROMPTS` times (default 2, 0 disables), honoring explicit no-change verdicts and real worktree deltas
 
 ### Long-Running Execution (100+ iterations)
 
@@ -132,10 +150,12 @@
 - **Memory monitoring**: Heap usage checked every 10 iterations; warning at 80% usage
 - **Smart re-prompting**: Self-heal prompts include list of failed tools and "try a DIFFERENT approach" instructions
 - **Pagination**: `read_file` supports `offset` + `limit` for partial file reads
+- **Context budget guard**: `SC_CONTEXT_BUDGET_TOKENS` caps the assembled system-prompt injection; over-budget sources are trimmed deterministically (memory → repo_profile → project_context → repo_map → shell → non_interactive → system, which is never dropped) and per-source spend lands in the run manifest `context_budget` block
 
 ### Phase 3 — Robusteza (Edge Cases & Hardening)
 
 - **`deepMerge` cycle detection**: Uses `WeakSet` to track visited objects; throws on circular references in config
+- **`deepMerge` prototype-pollution guard (#478)**: Iterates own enumerable keys only (`Object.keys`) and skips `__proto__`/`constructor`/`prototype` at every merge level with a stderr warning naming the key path and file; the same denylist guards the repo-probe manifest parsers (TOML/YAML/Makefile/XML) and the permission-prompt arg redaction
 - **URL validation**: `validateConfig` + `provider.ts` validate `baseUrl` with `new URL()` before use
 - **`collectFiles` depth limit**: Max 20 directory depth to prevent stack overflow on deeply nested trees
 - **`unlinkSync` error propagation**: Logs warning with error message instead of silent catch during cleanup
@@ -181,6 +201,9 @@ npm run build     # Compile TypeScript
 npm run dev       # Watch mode
 npm link          # Install globally
 sc-agent          # Run the CLI
+npm test          # Unit/integration suite (vitest, src/**/*.test.ts)
+npm run test:e2e  # E2E smoke suite — spawns built bin/sc.js vs a mock provider
+                  # (test/e2e/, requires `npm run build` first; see its README)
 ```
 
 ## Common Tasks
@@ -225,7 +248,7 @@ sc-agent profile use my-custom
 
 ## Notes
 
-- Uses native `fetch` (Node 18+), no external HTTP library needed
+- Uses native `fetch` (Node 20+), no external HTTP library needed
 - Streaming is done via `ReadableStream` (Web Streams API)
 - Cross-platform shell execution uses `spawn({ shell: true })`
 - No external AI SDK dependencies (direct API calls)

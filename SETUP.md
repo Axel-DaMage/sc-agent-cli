@@ -4,7 +4,7 @@ Get `scc` command working in PowerShell and WSL in under 2 minutes.
 
 ## Prerequisites
 
-- Node.js >= 18.0.0 installed
+- Node.js >= 20.0.0 installed
 - SC CLI project at `D:\git\sc-agent-cli`
 
 ## Option A: Automated Setup (Recommended)

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/os-santiago/sc-agent-cli/tree/main/docs
+    about: User guides — permission profiles, environment variables, sandboxing, provider setup, non-interactive mode.
+  - name: FAQ and troubleshooting
+    url: https://github.com/os-santiago/sc-agent-cli/blob/main/docs/FAQ.md
+    about: Common installation, configuration, and provider questions answered before opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/os-santiago/sc-agent-cli/security/advisories/new
+    about: Report vulnerabilities privately per SECURITY.md — never via a public issue.

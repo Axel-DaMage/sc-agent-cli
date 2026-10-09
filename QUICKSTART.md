@@ -4,7 +4,7 @@ Get up and running with SC-Agent CLI in 5 minutes.
 
 ## Prerequisites
 
-- Node.js >= 18.0.0
+- Node.js >= 20.0.0
 - A running LLM endpoint (Ollama, OpenAI, or any OpenAI-compatible API)
 
 ## Installation

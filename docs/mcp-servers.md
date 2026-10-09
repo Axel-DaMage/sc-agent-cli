@@ -7,7 +7,7 @@ GitHub MCP, filesystem servers, …) instead of bespoke tools.
 ## Configuration
 
 ```json
-// ~/.sc-agent/config.json or .sc-agent.json
+// ~/.sc-agent/config.json — global scope only (see trust note below)
 {
   "mcp": {
     "servers": {
@@ -18,14 +18,28 @@ GitHub MCP, filesystem servers, …) instead of bespoke tools.
 }
 ```
 
+> **Workspace trust (#469):** `mcp.servers` is a privileged key — server
+> `command`/`args` spawn at session start, so the key is *ignored* (with a
+> stderr warning + `config.privileged_key_blocked` audit event) when it comes
+> from a config file inside the workspace (`.sc-agent.json` or an
+> inside-resolving `SC_CONFIG_PATH`). Configure MCP servers in the global
+> config only — otherwise cloning a hostile repo would run attacker commands
+> the moment `sc chat` opens.
+
 Per server:
 
 | Field | Description |
 |-------|-------------|
 | `command` | Executable to spawn (required) |
 | `args` | Arguments array |
-| `env` | Extra environment variables |
+| `env` | Extra environment variables — the only way to pass secrets to a server (see below) |
 | `timeoutMs` | Per-request timeout (default `30000`) |
+
+> **Environment note (#471):** server processes receive the scrubbed
+> allowlisted child env (PATH/HOME/shell basics), **not** the agent's
+> `process.env`. Provider credentials (`SC_API_KEY`, `*_API_KEY`, `*_TOKEN`,
+> `*_SECRET`, …) are stripped unconditionally — wire any key a server needs
+> explicitly through its `env` map.
 
 ## Behavior
 

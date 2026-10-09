@@ -1,0 +1,19 @@
+# Shared editor defaults — https://editorconfig.org
+# Keeps indentation, charset, and newline style consistent across editors (#502).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Markdown hard line breaks are trailing double-spaces — keep them.
+[*.md]
+trim_trailing_whitespace = false
+
+# PowerShell scripts follow the Windows-native convention.
+[*.ps1]
+end_of_line = crlf

@@ -130,25 +130,168 @@ sc -yq "run npm test and report results"
 | `-yq` | Combined: auto-approve + quiet | Fully automated scripts |
 | `--output-format json` | Emit *only* the JSON run manifest on stdout | Machine consumers (CI workers, dashboards) |
 | `--summary-file <path>` / `--output-file <path>` | Also write the manifest to a file | Artifact collection, cost accounting |
+| `--devcontainer` | Run the agent inside the repo `.devcontainer` image | CI/prod parity, toolchain drift prevention |
+| `--role <planner\|executor\|reviewer>` | Pin the headless run to a single orchestration phase (env: `SC_ROLE`) | Running one pipeline step under a role-specific model |
 
 ---
 
 ## Run Manifest (JSON)
 
-In batch mode, the last stdout line is always a single-line JSON manifest — parse with `tail -1 | jq`. With `--output-format json` it is the *only* stdout output (the model's streamed answer is suppressed and carried in `final_message`).
+In batch mode, the last stdout line is always a single-line JSON manifest — parse with `tail -1 | jq`. With `--output-format json` it is the *only* stdout output: the model's streamed answer is suppressed (carried in `final_message`), and status markers (`SCC_NO_CHANGES`, `SC_BUDGET_EXCEEDED`), warnings, and errors go to **stderr** so stdout stays a single parseable JSON object.
 
 ```bash
 sc chat -yq --output-format json --output-file run.json "add input validation"
 ```
 
 ```json
-{"v":1,"success":true,"model":"gpt-4o","tokens_in":41230,"tokens_out":3180,
- "estimated_cost_usd":0.1284,"tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},
- "tool_calls_total":10,"iterations":14,"duration_ms":84210,"exit_reason":"success",
- "final_message":"Added zod validation to ...","checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json"}
+{"v":1,"version":"0.4.2","success":true,"model":"gpt-4o","session_id":"<id>",
+ "exit_reason":"success","iterations":14,
+ "tool_calls":{"read_file":5,"edit_file":3,"run_shell":2},"tool_calls_total":10,
+ "tokens_in":41230,"tokens_out":3180,"estimated_cost_usd":0.1284,
+ "duration_ms":84210,"final_message":"Added zod validation to ...",
+ "checkpoint":"/home/u/.sc-agent/checkpoints/<id>.json","error":null,
+ "provider":"openai/gpt-4o","resolution":"completed"}
 ```
 
-`exit_reason` is one of `success | error | no_changes | budget_exceeded`. `checkpoint` points to the resumable state file when one exists (see `--resume`). The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), and budget exhaustion (`SC_BUDGET_EXCEEDED`) — always as the last stdout line.
+`exit_reason` is one of `success | error | no_changes | budget_exceeded | interrupted`. `checkpoint` points to the resumable state file when one exists (see `--resume`; `session_id` is also a valid resume ref). `error` carries the failure description on non-success exits, else `null`.
+
+The manifest is emitted on **every** exit path — success, error, no-changes (`SCC_NO_CHANGES`), budget exhaustion (`SC_BUDGET_EXCEEDED`), and signal interruption (`SIGINT` → exit 130, `SIGTERM` → exit 143, e.g. CI `timeout` kills) — always as the last stdout line, with `success:false` on failure exits.
+
+The manifest also carries a `context_budget` block (#422) with per-source context spend — the assembled system-prompt injection (`system`, `shell`, `repo_profile`, `project_context`, `memory`, `non_interactive`) plus a cumulative `tool_outputs` line for tool results injected during the run:
+
+```json
+"context_budget": {"budget_tokens": 8000, "requested_tokens": 12140,
+  "injected_tokens": 11440, "over_budget": true,
+  "sources": [
+    {"source":"system","tokens_requested":5400,"tokens_injected":5400,"truncated":false,"dropped":false},
+    {"source":"project_context","tokens_requested":3000,"tokens_injected":2600,"truncated":true,"dropped":false},
+    {"source":"memory","tokens_requested":300,"tokens_injected":0,"truncated":true,"dropped":true},
+    {"source":"tool_outputs","tokens_requested":3440,"tokens_injected":3440,"truncated":false,"dropped":false}]}
+```
+
+When `SC_CONTEXT_BUDGET_TOKENS` is set and the assembly exceeds it, sources are trimmed in the documented priority order (`memory` first, `system` last — never fully dropped) and `over_budget` is `true` with per-source `truncated`/`dropped` flags. Unset = no cap (`budget_tokens: null`); spend is still accounted. See `docs/environment-variables.md`.
+
+`--output-format json` requires a prompt (or `--prompt-file`); it is rejected for interactive sessions.
+
+When `--devcontainer` is used the manifest also carries a `devcontainer` block recording the resolved execution path:
+
+```json
+"devcontainer": {"requested": true, "exec_path": "devcontainer", "status": "devcontainer",
+  "marker": "SC_DEVCONTAINER=1", "hostname": "b3f1a2c4d5e6",
+  "config_path": ".devcontainer/devcontainer.json"}
+```
+
+or, on fallback:
+
+```json
+"devcontainer": {"requested": true, "exec_path": "host",
+  "status": "devcontainer_unavailable", "reason": "cli_missing",
+  "config_path": ".devcontainer/devcontainer.json"}
+```
+
+---
+
+## Devcontainer Execution (`--devcontainer`)
+
+Repos that declare a `.devcontainer.json` (repo root) or `.devcontainer/devcontainer.json` already pin their toolchain. `--devcontainer` runs the agent loop inside that image instead of on the host:
+
+```bash
+scc chat -yq --devcontainer --output-file run.json "implement issue #42"
+```
+
+How it works (all via the [Dev Container CLI](https://github.com/devcontainers/cli), which must be on `PATH` together with `docker`):
+
+1. Detect the devcontainer config (`sc probe` reports it as `devcontainer: true` + `devcontainerPath`).
+2. `devcontainer up --workspace-folder .` — build/start the container.
+3. `devcontainer exec --workspace-folder . --remote-env SC_DEVCONTAINER=1 scc chat <original args>` — the full argv is forwarded verbatim, and the `SC_DEVCONTAINER` remote-env marker tells the in-container run to record itself in the manifest (`marker` + container `hostname`) instead of re-orchestrating. The in-container exit code propagates to the caller.
+
+**Fallback — never hard-fails.** If the `devcontainer`/`docker` CLIs are missing, no devcontainer config exists, or `devcontainer up`/`exec` fails for any reason, the run continues on the host and is classified `devcontainer_unavailable` with a `reason` of `no_config | cli_missing | docker_missing | up_failed | exec_failed`. The decision is written to the audit log (`--audit-log`, `type: "devcontainer"` events record the exec path and command) and to the run manifest.
+
+Env knobs: `SC_DEVCONTAINER_AGENT_CMD` overrides the in-container command (default `scc`). `SC_DEVCONTAINER` is set automatically inside the container — do not set it on the host.
+
+Failover contract fields (#425):
+
+- `resolution` — `"completed"` on success; otherwise mirrors `exit_reason`
+- `provider` — `provider/model` label of the failover candidate that served the run (the configured model unless the cascade advanced; see `SC_FAILOVER`)
+- `terminalResolution` — present on error exits; `"provider_error"` when the provider chain was exhausted (exit 24), otherwise mapped from the exit taxonomy (`auth_error`, `loop_abort`, `error`)
+- `errorClass` — failure class of the terminal candidate (`timeout`, `transport`, `rate_limit`, `server_error`, `auth`, `client`)
+- `attempts` — per-candidate attempt log: `[{candidate, attempt, errorClass, retryable, status, error, durationMs}]`
+
+```json
+{"v":1,"success":false,"model":"gpt-4o","provider":null,"resolution":"error",
+ "terminalResolution":"provider_error","errorClass":"rate_limit",
+ "attempts":[{"candidate":"openai/gpt-4o","attempt":4,"errorClass":"rate_limit",
+   "retryable":true,"status":429,"error":"API Error 429: rate limited","durationMs":312},
+   {"candidate":"anthropic/claude-sonnet-4-6","attempt":4,"errorClass":"rate_limit",
+   "retryable":true,"status":429,"error":"API Error 429: rate limited","durationMs":280}],
+ "exit_reason":"error", ...}
+```
+
+---
+
+## Multi-Model Orchestration (`roles`, #424)
+
+Different phases of a run have different intelligence needs — planning wants the strongest model, mechanical edits can run on a cheap/fast model, and review benefits from a different provider entirely (adversarial diversity). `config.roles` maps each phase role to a `provider/model` alias using the same resolution rules as `SC_FAILOVER` (profile name → known provider → model id on the configured endpoint):
+
+```json
+{
+  "roles": {
+    "planner":  "anthropic/claude-sonnet-4-6",
+    "executor": "openai/gpt-4o-mini",
+    "reviewer": "nvidia/llama-3.3-70b-instruct"
+  }
+}
+```
+
+**All roles are optional.** When `roles` is present, a headless run expands into a `planner → executor → reviewer` pipeline: the planner inspects the workspace read-only and emits a plan, the executor applies the changes with the full tool set, and the reviewer audits the work read-only and emits a verdict. Absent or invalid role mappings are never fatal — the phase falls back to the run's default model and is listed in `role_fallback`. Without `roles`, the classic single-phase run is preserved unchanged.
+
+Phase policies:
+
+- **planner / reviewer** — read-only: `write_file`/`edit_file`/`memory_write` are dropped from the tool schema and other mutating calls (e.g. a mutating `git` op or `run_shell` command) are rejected at dispatch. Completion guards (self-heal, zero-mutation, livelock) are suppressed — prose plans and verdicts are the correct output.
+- **executor** — full tool set and the normal completion guards.
+
+Pin a single phase instead of the whole pipeline with `--role` (or `SC_ROLE`):
+
+```bash
+sc chat -yq --role executor "implement issue #42"          # executor phase only
+SC_ROLE=reviewer sc chat -yq --output-format json "…"       # reviewer phase only
+```
+
+Each phase re-roots the provider chain at its role's candidate — `SC_FAILOVER` still cascades behind it, and a role candidate never forwards the primary model's API key to a different host (same credential isolation as the cascade).
+
+### Reviewer consensus loop (#462)
+
+The reviewer phase is a *judge*: its prompt requires a terminal verdict line — `VERDICT: approve` or `VERDICT: request_changes`. On `request_changes` the reviewer comments are sent back to the executor for a rework round, after which the reviewer re-reviews the updated workspace — bounded by `SC_ROLE_MAX_FIXES` (default `3`; `0` disables the loop, the review still runs once). Reviewer output without a marker falls back to bottom-up prose signal detection; unparseable output defaults to `approve` (`explicit: false` in the manifest) — rework is never forced without affirmative defect evidence.
+
+Review benefits from *provider diversity*: when the reviewer role resolves to the same provider+model as the executor — including both falling back to the default model — the run emits a one-time **stderr** warning (a model grading its own work). It is a warning, not a failure.
+
+A `--role`/`SC_ROLE` pin never loops: the single phase runs once and the reviewer verdict is still parsed into the manifest `review` block.
+
+### Manifest fields
+
+```json
+{"v":1,"success":true,"model":"llama3.2","provider":"openai/gpt-4o-mini",
+ "phases":[
+   {"role":"planner","provider":"anthropic","model":"claude-sonnet-4-6","iterations":3},
+   {"role":"executor","provider":"openai","model":"gpt-4o-mini","iterations":11},
+   {"role":"executor","provider":"ollama","model":"llama3.2","iterations":2},
+   {"role":"reviewer","provider":"ollama","model":"llama3.2","iterations":1}],
+ "role_fallback":["reviewer"],
+ "tokens":{"byRole":{"planner":{"in":8300,"out":1200},
+                     "executor":{"in":41000,"out":5300,"cached":9000},
+                     "reviewer":{"in":26000,"out":800}},
+           "total":{"in":75300,"out":7300,"cached":9000}},
+ "review":{"verdict":"approve","explicit":true,"fix_rounds":1,"max_fixes":3},
+ "iterations":17,"exit_reason":"success", ...}
+```
+
+- `phases` — append-only segment log: each entry records `role`, serving `provider`/`model`, and completed LLM `iterations`. Phase retries and mid-phase `SC_FAILOVER` cascades **append** entries (above, the executor cascaded to Ollama mid-phase) rather than overwriting — rework rounds and re-reviews append executor/reviewer segments the same way (#462).
+- `role_fallback` — roles whose configured mapping was absent or invalid and ran on the default model.
+- `tokens.byRole` — input/output (and `cached`, when the provider reports it) attributed per role — `tokens.byRole.reviewer` aggregates usage across the initial review and every re-review; `tokens.total` mirrors `tokens_in`/`tokens_out`. `estimated_cost_usd` prices each role at its serving model.
+- `review` — #462 consensus outcome, present when a reviewer phase produced a verdict: `verdict` (`approve`/`request_changes`), `explicit` (false = verdict inferred from prose), `fix_rounds` (executor rework passes consumed), `max_fixes` (the `SC_ROLE_MAX_FIXES` bound).
+- `iterations` — total LLM iterations across all phases.
+
+Usage capture: when `stream` is enabled the provider is asked for `stream_options.include_usage`, and a reported `usage` object (streamed or not) supersedes the chars/4 heuristic in the tracker. Providers that don't report usage keep the estimate.
 
 ---
 
@@ -210,10 +353,11 @@ sc "analyze this code"
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Error (API error, invalid prompt, etc.) |
+Batch runs terminate with the documented, machine-consumable contract in
+[`docs/exit-codes.md`](exit-codes.md) — `0` success, `1` generic error,
+`10`/`11` zero-mutation terminals, `20`–`24` failure classes, `130`/`143`
+signal exits. Wrappers should branch on `$?` alone; see the full table and
+marker contract there (section "Exit-Code Contract" below for usage).
 
 ---
 
@@ -372,19 +516,15 @@ Restores the checkpoint's conversation history and reuses its session id (checkp
 
 ## Exit-Code Contract (stable, machine-consumable)
 
-Batch runs terminate with a documented exit code — wrappers branch on `$?` alone:
+Batch runs terminate with a documented exit code — wrappers branch on `$?`
+alone. The canonical, normative contract lives in
+[`docs/exit-codes.md`](exit-codes.md): every code, its trigger paths, its
+stdout/stderr marker, and the failover nuance (HTTP failures — including a
+live `401` or `500` — surface as `24` provider-chain-exhausted, not `20`/`21`).
 
-| Code | Meaning | Marker on last stdout line |
-|------|---------|----------------------------|
-| `0`  | Success (changes produced, or interactive run) | — |
-| `1`  | Generic/unspecified error | `Error: …` |
-| `10` | Success, **zero mutations** — model refused / read-only / no tools executed | `SCC_NO_CHANGES` |
-| `20` | Provider error — network, timeout, 5xx, repeated empty responses | `Error: …` |
-| `21` | Auth error — 401/403, missing or invalid API key | `Error: …` |
-| `22` | Execution budget exhausted (`--max-steps`/`--max-seconds`/`--max-total-tokens`) | `SC_BUDGET_EXCEEDED <steps\|seconds\|tokens>` |
-| `23` | Agent-loop abort — tool livelock (`--livelock-threshold`), unrecoverable loop | `[SC_LIVELOCK] …` |
-
-Reserved: 2-9 clean terminals, 11-19 run outcomes, 24+ fatal. Codes are stable across releases.
+Reserved: 2-9 clean terminals, 12-19 run outcomes (`11` = not-actionable /
+blocked, `SCC_NOT_ACTIONABLE`/`SCC_BLOCKED`), 25+ fatal. Codes are stable
+across releases and asserted end-to-end by `test/e2e/chat-exit-codes.test.ts`.
 
 ```bash
 scc chat -yq --max-steps 50 'implement issue #42'
@@ -395,3 +535,20 @@ case $? in
   22) echo "raise the budget or split the task" ;;
 esac
 ```
+
+## Zero-Mutation Completion Guard
+
+In unattended runs (`-y` / `--permissions unlimited`), a prompt that requests workspace changes must not end its turn having executed zero mutating tools. When the model answers with prose only — a narrated plan, a patch pasted as text, or a premature "done" — the agent blocks the turn completion and re-prompts the model to apply the change via `write_file`/`edit_file`/`git`/`run_shell`.
+
+- **Budget:** `SC_ZERO_MUTATION_REPROMPTS` (default `2`; `0` disables the guard).
+- **Worktree check:** the guard also compares git status before/after the run, so writes made through unclassified shell paths still count as mutations and are never re-prompted.
+- **No-change verdict honored:** an explicit verdict ("no changes required", "already implemented", "nothing to commit") completes the turn immediately — `SCC_NO_CHANGES` / exit `10` remains the contract for genuine no-op runs.
+- **Scope:** only mutation-scoped prompts in unattended mode. Interactive sessions and read-only prompts (summarize, explain, list) complete without re-prompting.
+
+## Unattended Git Guard
+
+In unattended runs (`-y` / `--permissions unlimited`) the dedicated `git` tool owns repo state: `run_shell` refuses git-mutating commands (`git checkout --`, `git restore`, `git reset --hard`, `git clean -f`, `git stash`, `git commit`, `git push`, `git pull`, `git rebase`, `git merge`, `git switch`, …) with a refusal routed back to the model. This prevents the model from silently reverting its own edits — e.g. interpreting "do not commit" as `git checkout -- .` — and keeps all repo-state operations on the audited `git` tool (`status`/`diff`/`log`/`show`/`branch`/`add`/`commit`/`format`).
+
+Corollary: the manifest's `files_changed` counts the **real worktree diff** — `git status --porcelain` after the run plus files in commits created during the run — excluding engine artifacts (`--summary-file`, `--output-file`, `--audit-log` paths inside the worktree). A run that reverted all its edits, or only produced session artifacts, reports `files_changed: 0`.
+
+Interactive sessions are unaffected: commands still prompt a human supervisor. To hard-block git mutations in every mode (orchestrators that own git state externally), use `--no-commit` / `permissions.denyGitMutation`.

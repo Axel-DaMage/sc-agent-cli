@@ -83,7 +83,12 @@ export interface RepoProfile {
   frameworks: FrameworkInfo[];
   commands: RepoCommands;
   ci: CIInfo;
-  devcontainer?: DevcontainerInfo;
+  /** true when `.devcontainer.json` or `.devcontainer/devcontainer.json` exists (#421). */
+  devcontainer: boolean;
+  /** Workspace-relative path to the devcontainer config file when detected. */
+  devcontainerPath?: string;
+  /** Parsed devcontainer configuration details when the file could be read. */
+  devcontainerInfo?: DevcontainerInfo;
   manifests: string[];
   rawFindings?: UnknownEcosystemFindings;
   notes?: string[];
