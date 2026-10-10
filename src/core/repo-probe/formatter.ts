@@ -107,9 +107,10 @@ export function formatRepoProfileForTerminal(profile: RepoProfile): string {
   if (profile.devcontainer) {
     lines.push(chalk.cyan.bold(`├${'─'.repeat(width)}┤`));
     lines.push(`│ ${chalk.yellow.bold('🐳 Devcontainer:')}`);
-    if (profile.devcontainer.image) lines.push(`│   • Image: ${profile.devcontainer.image}`);
-    if (profile.devcontainer.postCreateCommand) {
-      lines.push(`│   • postCreate: ${profile.devcontainer.postCreateCommand}`);
+    if (profile.devcontainerPath) lines.push(`│   • Config: ${profile.devcontainerPath}`);
+    if (profile.devcontainerInfo?.image) lines.push(`│   • Image: ${profile.devcontainerInfo.image}`);
+    if (profile.devcontainerInfo?.postCreateCommand) {
+      lines.push(`│   • postCreate: ${profile.devcontainerInfo.postCreateCommand}`);
     }
   }
 
@@ -206,6 +207,13 @@ export function formatRepoProfileForPrompt(profile: RepoProfile): string {
     for (const mc of profile.ci.minedVerifyCommands) {
       parts.push(`  • \`${mc}\``);
     }
+  }
+
+  // Devcontainer
+  if (profile.devcontainer) {
+    const dcBits = [`present (\`${profile.devcontainerPath ?? 'devcontainer.json'}\`)`];
+    if (profile.devcontainerInfo?.image) dcBits.push(`image: \`${profile.devcontainerInfo.image}\``);
+    parts.push(`- **Devcontainer**: ${dcBits.join(', ')}`);
   }
 
   // Unknown raw findings fallback hints

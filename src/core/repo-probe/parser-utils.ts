@@ -2,6 +2,13 @@
  * Lightweight, zero-dependency parsers for TOML, YAML (CI), JSONC, XML, and Makefiles.
  */
 
+// Keys that must never be written via `target[key] = ...` when the key comes
+// from an untrusted manifest file (#478): '__proto__' invokes the prototype
+// setter — or resolves to Object.prototype during traversal, escalating to
+// global pollution — while 'constructor'/'prototype' shadow inherited members.
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const isUnsafeKey = (key: string): boolean => UNSAFE_KEYS.has(key);
+
 /**
  * Strip comments and trailing commas from JSON/JSONC string and parse safely.
  */
@@ -43,6 +50,12 @@ export function parseTomlSafe(content: string): Record<string, any> {
     const arrayTableMatch = line.match(/^\[\[\s*([a-zA-Z0-9_.-]+)\s*\]\]$/);
     if (arrayTableMatch) {
       const pathParts = arrayTableMatch[1].split('.');
+      if (pathParts.some(isUnsafeKey)) {
+        // Detached sink: pairs under a hostile header are dropped instead of
+        // bleeding into the previous section or writing to Object.prototype.
+        currentTarget = {};
+        continue;
+      }
       let obj = result;
       for (let p = 0; p < pathParts.length - 1; p++) {
         const part = pathParts[p];
@@ -62,6 +75,10 @@ export function parseTomlSafe(content: string): Record<string, any> {
     const tableMatch = line.match(/^\[\s*([a-zA-Z0-9_.-]+)\s*\]$/);
     if (tableMatch) {
       const pathParts = tableMatch[1].split('.');
+      if (pathParts.some(isUnsafeKey)) {
+        currentTarget = {};
+        continue;
+      }
       let obj = result;
       for (const part of pathParts) {
         if (!obj[part] || typeof obj[part] !== 'object' || Array.isArray(obj[part])) {
@@ -77,6 +94,7 @@ export function parseTomlSafe(content: string): Record<string, any> {
     const kvMatch = line.match(/^([a-zA-Z0-9_.-]+)\s*=\s*(.*)$/);
     if (kvMatch) {
       const key = kvMatch[1].trim();
+      if (isUnsafeKey(key)) continue;
       let rawVal = kvMatch[2].trim();
 
       // Handle inline comments outside strings
@@ -148,8 +166,9 @@ function parseTomlValue(
     const pairs = inner.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
     for (const pair of pairs) {
       const [k, ...vParts] = pair.split('=');
-      if (k && vParts.length > 0) {
-        subObj[k.trim()] = parseTomlValue(vParts.join('=').trim(), lines, currentIdx, () => {});
+      const subKey = k?.trim();
+      if (subKey && !isUnsafeKey(subKey) && vParts.length > 0) {
+        subObj[subKey] = parseTomlValue(vParts.join('=').trim(), lines, currentIdx, () => {});
       }
     }
     return subObj;
@@ -197,7 +216,6 @@ export function parseCiWorkflowYaml(content: string): RawWorkflow {
   const lines = content.split(/\r?\n/);
   let currentJobName: string | null = null;
   let currentStep: RawWorkflowStep | null = null;
-  let inSteps = false;
   let inWith = false;
   let inRunBlock = false;
   let runBlockLines: string[] = [];
@@ -240,21 +258,29 @@ export function parseCiWorkflowYaml(content: string): RawWorkflow {
       continue;
     }
 
-    // Job header: e.g. "  build:" or "  test:"
-    const jobHeaderMatch = rawLine.match(/^ {2,4}([a-zA-Z0-9_-]+):\s*$/);
-    if (jobHeaderMatch && !inSteps) {
-      currentJobName = jobHeaderMatch[1];
-      result.jobs[currentJobName] = {
-        name: currentJobName,
-        steps: [],
-      };
+    // Steps list start — checked before the job-header pattern: '    steps:'
+    // at 4-space indent also matches 'key:' and would otherwise register a
+    // bogus job named 'steps' while the real job's steps stayed empty (#478).
+    if (/^\s*steps:\s*$/.test(trimmed)) {
+      inWith = false;
       continue;
     }
 
-    // Steps list start
-    if (/^\s*steps:\s*$/.test(trimmed)) {
-      inSteps = true;
+    // Job header: e.g. "  build:" or "  test:"
+    const jobHeaderMatch = rawLine.match(/^ {2,4}([a-zA-Z0-9_-]+):\s*$/);
+    if (jobHeaderMatch) {
+      const jobName = jobHeaderMatch[1];
+      // Unsafe names resolve to inherited members on result.jobs — '__proto__'
+      // writes through the prototype, 'constructor' reads back as Function.
+      currentJobName = isUnsafeKey(jobName) ? null : jobName;
+      currentStep = null;
       inWith = false;
+      if (currentJobName) {
+        result.jobs[currentJobName] = {
+          name: currentJobName,
+          steps: [],
+        };
+      }
       continue;
     }
 
@@ -321,7 +347,7 @@ export function parseCiWorkflowYaml(content: string): RawWorkflow {
       // Key-value inside `with:` block
       if (inWith && currentStep.with) {
         const withKvMatch = rawLine.match(/^\s+([a-zA-Z0-9_.-]+):\s*(['"]?)(.+?)\2\s*$/);
-        if (withKvMatch) {
+        if (withKvMatch && !isUnsafeKey(withKvMatch[1])) {
           currentStep.with[withKvMatch[1]] = withKvMatch[3];
           continue;
         }
@@ -353,7 +379,7 @@ export function parseXmlProperties(content: string): Record<string, string> {
   while ((match = tagRegex.exec(content)) !== null) {
     const tagName = match[1];
     const val = match[2].trim();
-    properties[tagName] = val;
+    if (!isUnsafeKey(tagName)) properties[tagName] = val;
   }
   return properties;
 }
@@ -374,8 +400,13 @@ export function parseMakefileTargets(content: string): Record<string, string[]> 
     // Makefile target definition: `target: dependencies`
     const targetMatch = line.match(/^([a-zA-Z0-9_.-]+)\s*:(?!=)/);
     if (targetMatch && !line.startsWith('\t') && !line.startsWith('  ')) {
-      currentTarget = targetMatch[1];
-      if (!targets[currentTarget]) {
+      const name = targetMatch[1];
+      // Unsafe names resolve to inherited members — targets['__proto__'] reads
+      // Object.prototype and .push() below would throw (#478).
+      currentTarget = isUnsafeKey(name) ? null : name;
+      // Object.hasOwn (not truthiness): 'hasOwnProperty'/'toString' targets
+      // must create an own array instead of reading the inherited function.
+      if (currentTarget && !Object.hasOwn(targets, currentTarget)) {
         targets[currentTarget] = [];
       }
       continue;

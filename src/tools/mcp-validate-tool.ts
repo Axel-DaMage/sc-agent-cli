@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type { Tool, ToolContext } from './tool.js';
 import { requestPermission } from '../utils/permissions.js';
+import { buildChildEnv } from '../utils/env-scrub.js';
 
 interface McpInitializeResult {
   serverInfo?: { name: string; version: string };
@@ -16,6 +17,8 @@ function callMcpInitialize(command: string, args: string[], timeoutMs: number): 
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       timeout: timeoutMs,
+      // #471 — model-supplied command: never hand it provider credentials.
+      env: buildChildEnv(process.env),
     });
 
     const chunks: Buffer[] = [];

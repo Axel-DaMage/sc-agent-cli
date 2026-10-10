@@ -1,7 +1,12 @@
 import chalk from 'chalk';
-import type { Message, ProjectConfig, StreamDelta, AgentCallbacks } from './types.js';
+import type { Message, ProjectConfig, StreamDelta, AgentCallbacks, ToolCall } from './types.js';
 import { OpenAICompatibleProvider } from './provider.js';
-import { loadProjectContext } from './project-context.js';
+import { resolveFailoverChain } from './failover.js';
+import type { CandidateAttempt } from './failover.js';
+import { PhaseTracker, READ_ONLY_PHASE_DENIED_TOOLS } from './roles.js';
+import type { AgentRole, PhaseRecord, RoleResolution } from './roles.js';
+import { loadProjectContext, loadPolicyFile } from './project-context.js';
+import { generateRepoMap } from './repo-map.js';
 import { probeRepo, formatRepoProfileForPrompt } from './repo-probe/index.js';
 import { ALL_TOOLS, getToolByName } from '../tools/registry.js';
 import type { ToolContext } from '../tools/tool.js';
@@ -12,11 +17,29 @@ import type { ShellInfo } from '../utils/shell-env.js';
 import { renderInline } from '../utils/markdown-renderer.js';
 import { enhanceError, formatEnhancedError } from '../utils/error-enhancer.js';
 import { boxHeader, boxFooter } from '../utils/box-drawing.js';
-import { TokenTracker, estimateMessageTokens } from '../utils/token-tracker.js';
-import { saveCheckpoint } from '../utils/checkpoint.js';
+import { TokenTracker, estimateMessageTokens, estimateTokens } from '../utils/token-tracker.js';
+import {
+  applyContextBudget,
+  formatContextBudgetTrims,
+  resolveContextBudget,
+  type ContextBudgetReport,
+  type ContextSource,
+} from '../utils/context-budget.js';
+import { saveCheckpoint as _saveCheckpoint } from '../utils/checkpoint.js';
 import { AuditLogger } from '../utils/audit-log.js';
-import { verbose, verboseApiRequest, verboseApiResponse, verboseToolCall, verboseSession, verboseError } from '../utils/verbose-logger.js';
+import { verbose, verboseApiRequest as _verboseApiRequest, verboseApiResponse as _verboseApiResponse, verboseToolCall, verboseSession, verboseError as _verboseError } from '../utils/verbose-logger.js';
+import { SandboxRuntime } from '../utils/sandbox.js';
+import type { SandboxViolation, SandboxRunInfo } from '../utils/sandbox.js';
 import { resolveThrottleConfig } from '../utils/throttle.js';
+import {
+  getWorkspaceGitState,
+  hasWorktreeChanges,
+  isMutatingToolCall,
+  isWorkspaceMutatingToolCall,
+  expectsWorkspaceMutation,
+  declaresNoChangesNeeded,
+} from '../utils/mutation-detector.js';
+import { redactSecrets, redactDeep, registerConfigSecrets } from '../utils/secret-redaction.js';
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant with access to tools for working with files, web, git, and executing commands.
 
@@ -55,6 +78,8 @@ NEW TOOLS AVAILABLE:
 MEMORY SYSTEM (Cross-Session):
 - Use memory_read to recall information from previous sessions
 - Use memory_write to save important context, user preferences, project rules
+- Memories are scoped per workspace by default — they never leak into other projects. Pass scope:"global" only for truly cross-workspace facts
+- Injected memories carry a provenance tag: [memory:workspace] (this project) or [memory:global] (shared)
 - Memory persists across restarts - use it to build long-term understanding
 - Save key facts like: user's name, preferred languages, project architecture decisions
 
@@ -686,6 +711,14 @@ export function limitMessageHistory(messages: Message[], maxMessages: number = 6
   return result;
 }
 
+// #472 secret redaction: the history copy of a tool call carries masked
+// arguments (write_file content, run_shell commands can embed secrets).
+// `response.tool_calls` stays raw — the model's args must execute verbatim;
+// only what enters `messages` (provider context, sessions, checkpoints)
+// is masked.
+function redactToolCall(call: ToolCall): ToolCall {
+  return { ...call, function: { ...call.function, arguments: redactSecrets(call.function.arguments) } };
+}
 
 export interface AgentOptions {
   workspaceRoot: string;
@@ -703,12 +736,34 @@ export interface AgentOptions {
   livelockThreshold?: number;
   summaryFile?: string;
   outputFile?: string;
+  /** #421 devcontainer execution evidence — surfaced in the run manifest. */
+  devcontainer?: import('./devcontainer.js').DevcontainerRunInfo;
   /** 'json' suppresses all human stdout (banner, streamed answer) — the run
    *  manifest JSON line is the only stdout output. */
   outputFormat?: 'text' | 'json';
   maxSteps?: number;
   maxSeconds?: number;
   maxTotalTokens?: number;
+  /**
+   * #424 multi-model orchestration — pin this run to a single phase role
+   * (`--role`/`SC_ROLE`). When unset, a configured `roles` map expands the
+   * headless run into the full planner → executor → reviewer pipeline.
+   */
+  role?: AgentRole;
+}
+
+/**
+ * Per-phase routing options for `agent.run()` (#424). `routing` pins the
+ * provider/model for the duration of the call and scopes token accounting;
+ * `readOnly` denies mutating tool calls; `suppressCompletionGuards` skips
+ * self-heal/zero-mutation/livelock handling for phases whose correct output
+ * is prose (planner plans, reviewer verdicts).
+ */
+export interface AgentRunPhaseOptions {
+  /** Resolved role → candidate routing; presence marks this run as a phase. */
+  routing?: RoleResolution;
+  readOnly?: boolean;
+  suppressCompletionGuards?: boolean;
 }
 
 export class Agent {
@@ -721,31 +776,32 @@ export class Agent {
   private callbacks?: AgentCallbacks;
   public tokenTracker: TokenTracker;
   private _iterations: number = 0;
+  private _totalIterations: number = 0;
+  private phaseTracker = new PhaseTracker();
+  private _roleFallbacks: AgentRole[] = [];
+  private _phaseModel: string | null = null;
   private _toolRunCount: number = 0;
   private _toolCallCounts = new Map<string, number>();
   private _lastCheckpointIteration: number = 0;
   private _sessionId: string = '';
   private audit?: AuditLogger;
   private _budgetExceeded: 'steps' | 'seconds' | 'tokens' | null = null;
+  private sandbox?: SandboxRuntime;
+  private _contextBudgetReport: ContextBudgetReport | null = null;
 
   constructor(private options: AgentOptions) {
     this.callbacks = options.callbacks;
+    // #472: register the run's credentials for exact-match masking before
+    // any tool output or persistence write can carry them.
+    registerConfigSecrets(options.config);
     this.provider = new OpenAICompatibleProvider(options.config.model);
+    this.provider.setFailoverChain(resolveFailoverChain(options.config));
     const throttle = resolveThrottleConfig(
       options.config.settings?.throttling,
       options.config.model.model,
       options.config.model.baseUrl
     );
     this.provider.setThrottleConfig(throttle);
-    this.toolContext = {
-      workspaceRoot: options.workspaceRoot,
-      config: options.config,
-      autoApprove: options.autoApprove,
-    };
-    this.systemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
-    this.shellInfo = detectShell();
-    this.tokenTracker = new TokenTracker(options.config.model.model);
-    this._sessionId = options.sessionId || '';
     if (options.auditLog) {
       try {
         this.audit = new AuditLogger(options.auditLog);
@@ -753,15 +809,160 @@ export class Agent {
         this.audit = undefined; // unwritable path must not block the run
       }
     }
+    // #423 — sandboxed run_shell execution. The runtime resolves the profile,
+    // probes the backend (bwrap/proxy-only), and streams violations into the
+    // audit log + run manifest. Fail-closed: sandbox setup errors abort the
+    // session rather than silently running commands outside the boundary.
+    if (options.config.sandbox?.enabled) {
+      this.sandbox = new SandboxRuntime({
+        config: options.config,
+        workspaceRoot: options.workspaceRoot,
+        onViolation: (v: SandboxViolation) => {
+          this.audit?.emit({ type: 'sandbox_violation', rule: v.rule, target: v.target });
+        },
+        onNotice: (msg) => this.log(chalk.yellow(`  ⚠ ${msg}`)),
+      });
+    }
+    this.toolContext = {
+      workspaceRoot: options.workspaceRoot,
+      config: options.config,
+      autoApprove: options.autoApprove,
+      sandbox: this.sandbox,
+    };
+    this.systemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+    this.shellInfo = detectShell();
+    this.tokenTracker = new TokenTracker(options.config.model.model);
+    this._sessionId = options.sessionId || '';
   }
 
-  getStats(): { iterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
-    return { iterations: this._iterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
+  getStats(): { iterations: number; totalIterations: number; toolRunCount: number; sessionId: string; budgetExceeded: string | null } {
+    return { iterations: this._iterations, totalIterations: this._totalIterations, toolRunCount: this._toolRunCount, sessionId: this._sessionId, budgetExceeded: this._budgetExceeded };
+  }
+
+  /**
+   * Enter an orchestration phase (#424): the provider's failover chain is
+   * re-rooted at the role's resolved candidate (SC_FAILOVER still cascades
+   * behind it), token accounting is scoped to the role, and a phase segment
+   * opens in the manifest log. Fallbacks record `role_fallback`.
+   */
+  beginPhase(res: RoleResolution): void {
+    if (res.fallback && !this._roleFallbacks.includes(res.role)) {
+      this._roleFallbacks.push(res.role);
+    }
+    this._phaseModel = res.candidate.model.model;
+    this.phaseTracker.begin(res.role, res.candidate);
+    this.tokenTracker.setRole(res.role, res.candidate.model.model);
+    this.provider.setFailoverChain(resolveFailoverChain(this.options.config, res.candidate));
+    this.provider.setThrottleConfig(resolveThrottleConfig(
+      this.options.config.settings?.throttling,
+      res.candidate.model.model,
+      res.candidate.model.baseUrl
+    ));
+  }
+
+  /** Close the active phase — restores the run's default failover chain. */
+  endPhase(): void {
+    this.phaseTracker.end();
+    this.tokenTracker.setRole(null);
+    this._phaseModel = null;
+    this.provider.setFailoverChain(resolveFailoverChain(this.options.config));
+    this.provider.setThrottleConfig(resolveThrottleConfig(
+      this.options.config.settings?.throttling,
+      this.options.config.model.model,
+      this.options.config.model.baseUrl
+    ));
+  }
+
+  /** Append-only phase segments for the run manifest (#424). */
+  getPhases(): PhaseRecord[] {
+    return this.phaseTracker.getPhases();
+  }
+
+  /** Roles that fell back to the run's default model (manifest `role_fallback`). */
+  getRoleFallbacks(): AgentRole[] {
+    return [...this._roleFallbacks];
+  }
+
+  /** "provider/model" label of the failover candidate that served the last call. */
+  get providerUsed(): string | null {
+    return this.provider.providerUsed;
   }
 
   /** Per-tool invocation counts for the current session (#415 usage summary). */
   getToolCallCounts(): Record<string, number> {
     return Object.fromEntries(this._toolCallCounts);
+  }
+
+  /** "provider/model" label of the failover candidate serving this run (#425). */
+  getProviderUsed(): string | null {
+    return this.provider.providerUsed;
+  }
+
+  /**
+   * Per-source context-spend accounting for the system-prompt injection
+   * of the current run (#422). Null until the first run() assembles or
+   * accounts the system message.
+   */
+  getContextBudget(): ContextBudgetReport | null {
+    return this._contextBudgetReport;
+  }
+
+  /**
+   * Oversized injections are never silent (#422): surface a visible
+   * warning, a verbose detail line, and an audit event when the
+   * SC_CONTEXT_BUDGET_TOKENS guard trimmed or dropped a source.
+   */
+  private reportContextBudget(report: ContextBudgetReport): void {
+    if (!report.over_budget) return;
+    const trims = formatContextBudgetTrims(report);
+    this.log(chalk.yellow(
+      `\n  ⚠️  Context budget ${report.budget_tokens} est. tokens exceeded ` +
+      `(${report.requested_tokens} requested → ${report.injected_tokens} injected) — trimmed: ${trims}`
+    ));
+    verbose(`[CONTEXT_BUDGET] ${JSON.stringify(report)}`, 2);
+    this.audit?.emit({
+      type: 'context_budget',
+      budget_tokens: report.budget_tokens,
+      requested_tokens: report.requested_tokens,
+      injected_tokens: report.injected_tokens,
+      trimmed: report.sources.filter(s => s.truncated).map(s => s.source),
+    });
+  }
+
+  /**
+   * Tool outputs are a context source too (#422): accumulate their spend
+   * in the report. The injection cap does not apply here — oversized
+   * results are already trimmed by the >10KB auto-compressor (and older
+   * entries by message compression/pruning) — `truncated` reflects that.
+   */
+  private recordToolOutputSpend(requestedTokens: number, injectedTokens: number): void {
+    const report = this._contextBudgetReport;
+    if (!report) return;
+    let spend = report.sources.find(s => s.source === 'tool_outputs');
+    if (!spend) {
+      spend = { source: 'tool_outputs', tokens_requested: 0, tokens_injected: 0, truncated: false, dropped: false };
+      report.sources.push(spend);
+    }
+    spend.tokens_requested += requestedTokens;
+    spend.tokens_injected += injectedTokens;
+    spend.truncated = spend.tokens_injected < spend.tokens_requested;
+    report.requested_tokens += requestedTokens;
+    report.injected_tokens += injectedTokens;
+  }
+
+  /** Failed-attempt records from the last provider call (failover manifest). */
+  getFailoverAttempts(): CandidateAttempt[] {
+    return this.provider.failoverAttempts;
+  }
+
+  /** Manifest-facing sandbox posture, or null when sandboxing is disabled (#423). */
+  getSandboxInfo(): SandboxRunInfo | null {
+    return this.sandbox?.enabled ? this.sandbox.getRunInfo() : null;
+  }
+
+  /** Structured sandbox violations observed this run (#423). */
+  getSandboxViolations(): SandboxViolation[] {
+    return this.sandbox ? [...this.sandbox.violations] : [];
   }
 
   /**
@@ -812,7 +1013,7 @@ export class Agent {
     this.callbacks?.onToolStart?.({
       type: 'tool_start',
       timestamp: Date.now(),
-      data: { name, args },
+      data: { name, args: redactDeep(args) },
     });
   }
 
@@ -823,7 +1024,7 @@ export class Agent {
     this.callbacks?.onToolComplete?.({
       type: 'tool_complete',
       timestamp: Date.now(),
-      data: { name, result, duration },
+      data: { name, result: redactSecrets(result ?? ''), duration },
     });
   }
 
@@ -834,12 +1035,29 @@ export class Agent {
     this.callbacks?.onToolError?.({
       type: 'tool_error',
       timestamp: Date.now(),
-      data: { name, error },
+      data: { name, error: redactSecrets(error) },
     });
   }
 
-  async run(userMessage: string, history: Message[] = [], signal?: AbortSignal): Promise<Message[]> {
-    let messages: Message[] = [...history];
+  async run(userMessage: string, history: Message[] = [], signal?: AbortSignal, phase?: AgentRunPhaseOptions): Promise<Message[]> {
+    // #424: a phase-scoped run re-roots the provider at the role's candidate
+    // and opens a manifest segment; the finally guarantees the run's default
+    // chain is restored even when the phase throws.
+    const roleRes = phase?.routing ?? null;
+    if (roleRes) this.beginPhase(roleRes);
+    try {
+      return await this.runLoop(userMessage, history, signal, phase);
+    } finally {
+      if (roleRes) this.endPhase();
+    }
+  }
+
+  private async runLoop(userMessage: string, history: Message[] = [], signal?: AbortSignal, phase?: AgentRunPhaseOptions): Promise<Message[]> {
+    // #472: sanitize anything crossing into the provider context — history
+    // loaded from disk may carry secrets persisted before this layer existed.
+    let messages: Message[] = redactDeep(history);
+    const readOnlyPhase = phase?.readOnly ?? false;
+    const suppressGuards = phase?.suppressCompletionGuards ?? false;
 
     verbose(`Prompt received: ${userMessage.length} chars, ~${estimateMessageTokens({ role: 'user', content: userMessage })} tokens (estimated)`);
     verbose(`Auto-approve: ${!!this.options.autoApprove}, Quiet: ${!!this.options.quiet}`);
@@ -853,48 +1071,117 @@ export class Agent {
       // Only load project context for project-related queries (not for casual conversation)
       const userQuery = userMessage;
       const isProjectQuery = /\b(file|code|test|build|install|run|debug|fix|error|implement|refactor|check|verify|review|analyze|src\/|\.ts|\.js|\.json|\.yaml|\.yml|\.md|\.sh|\.py|\.java|\.go|\.rb|\.c|\.cpp|\.h|package|config|git|npm|pnpm|yarn|mvn|gradle|cargo|pip|docker|create|write|edit|read|search|grep|find|directory|folder|function|class|method|variable|import|export|module|component|service|controller|repository|endpoint|api|route|database|query|schema|migration|deploy|lint|format|commit|push|pull|merge|branch|tag|release|version|dependency|dependencies|bug|issue|feature|docs|documentation|README|LICENSE|Makefile|Dockerfile|workflow|action|pipeline|ci|cd|devops|kubernetes|helm|terraform|ansible)\b/i.test(userQuery);
-      const projectContext = isProjectQuery
-        ? await loadProjectContext(this.options.workspaceRoot, policyFile)
-        : null;
+
+      // Context injection mode (#461): 'skeleton' swaps the whole-file
+      // project-context injection for a generated repo map (`repo_map`
+      // source) — the agent pulls file bodies via read_file on demand.
+      // An explicitly configured policyFile is operator doctrine and is
+      // still injected (as project_context) even in skeleton mode.
+      const contextMode = this.options.config.context?.mode ?? 'full';
+      let projectContext: string | null = null;
+      let repoMapContext: string | null = null;
+      if (isProjectQuery) {
+        if (contextMode === 'skeleton') {
+          try {
+            const generatedMap = await generateRepoMap(this.options.workspaceRoot, this.options.config);
+            repoMapContext = generatedMap ? redactSecrets(generatedMap) : generatedMap;
+          } catch {
+            // Non-fatal: fall back to no index rather than failing the run.
+          }
+          const policyContext = policyFile
+            ? await loadPolicyFile(this.options.workspaceRoot, policyFile)
+            : null;
+          projectContext = policyContext ? redactSecrets(policyContext) : policyContext;
+        } else {
+          const loadedContext = await loadProjectContext(this.options.workspaceRoot, policyFile);
+          projectContext = loadedContext ? redactSecrets(loadedContext) : loadedContext;
+        }
+      }
 
       // Metrics: log context loading decision (optional - only if SC_DEBUG_METRICS is set)
       if (process.env.SC_DEBUG_METRICS) {
-        verbose(`[METRICS] Context loading: ${isProjectQuery ? 'LOADED' : 'SKIPPED'} | Query length: ${userQuery.length} | Context size: ${projectContext?.length || 0}B`);
+        verbose(`[METRICS] Context loading: ${isProjectQuery ? 'LOADED' : 'SKIPPED'} | mode: ${contextMode} | Query length: ${userQuery.length} | Context size: ${projectContext?.length || 0}B | Repo map: ${repoMapContext?.length || 0}B`);
       }
 
       let repoProfileContext: string | null = null;
       if (isProjectQuery) {
         try {
           const profile = await probeRepo(this.options.workspaceRoot);
-          repoProfileContext = `\n# Repository Profile & Toolchain\n${formatRepoProfileForPrompt(profile)}`;
+          repoProfileContext = redactSecrets(`\n# Repository Profile & Toolchain\n${formatRepoProfileForPrompt(profile)}`);
         } catch {
           // Non-fatal if probe fails
         }
       }
 
-      const memoryContext = await persistentMemory.getContextString();
+      // #472: injected sources feed the provider context too — persisted
+      // memory entries and repo docs can carry committed secrets.
+      const memoryContext = redactSecrets(await persistentMemory.getContextString(this.options.workspaceRoot));
 
       // Detect shell environment for cross-platform adaptation
       const shellInfo = detectShell();
       const shellContext = `\n# Shell Environment\n- Type: ${shellInfo.type}\n- Platform: ${process.platform}\n- Tips:\n${shellInfo.tips.map(t => `  • ${t}`).join('\n')}`;
       const shellPromptGuide = getShellPromptSections(shellInfo);
 
-      const contextParts = [this.systemPrompt, shellContext, shellPromptGuide];
-      if (repoProfileContext) contextParts.push(repoProfileContext);
-      if (projectContext) contextParts.push(`\n# Project Context\n${projectContext}`);
-      if (memoryContext) contextParts.push(memoryContext);
+      // Named injection sources so context spend is accounted per source
+      // (#422). Assembly order is preserved for the final join; the
+      // budget guard trims in CONTEXT_SOURCE_PRIORITY order instead.
+      const contextSources: ContextSource[] = [
+        { source: 'system', text: this.systemPrompt },
+        { source: 'shell', text: `${shellContext}\n${shellPromptGuide}` },
+      ];
+      if (repoProfileContext) contextSources.push({ source: 'repo_profile', text: repoProfileContext });
+      if (repoMapContext) contextSources.push({ source: 'repo_map', text: repoMapContext });
+      if (projectContext) contextSources.push({ source: 'project_context', text: `\n# Project Context\n${projectContext}` });
+      if (memoryContext) contextSources.push({ source: 'memory', text: memoryContext });
       if (this.options.autoApprove) {
-        contextParts.push(`
+        contextSources.push({
+          source: 'non_interactive',
+          text: `
 # Non-Interactive Mode (Auto-Approve Active)
 - **YOU HAVE UNLIMITED PERMISSION**: The user has run the tool with auto-approval enabled (-y / -yq).
 - **DO NOT ASK FOR PERMISSION**: Do not ask the user "Would you like me to...", "Should I...", "Do you want me to...", or wait for instructions.
 - **TAKE ACTION IMMEDIATELY**: Modify files, run shell commands, write patches, push commits, and complete the tasks autonomously.
 - **DO NOT PROPOSE AND STOP**: If you know how to fix it, do it right now using the tools.
-`);
+`,
+        });
+      }
+      if (this.sandbox?.enabled) {
+        const info = this.sandbox.getRunInfo();
+        const egressDesc =
+          info.egress === 'block_all'
+            ? 'ALL network egress is blocked except loopback'
+            : `network egress is restricted to the configured allowlist (${this.sandbox.profile.egressRules
+                .map((r) => `${r.match === 'suffix' ? '*.' : ''}${r.host}${r.port !== null ? `:${r.port}` : ''}`)
+                .join(', ') || 'none'})`;
+        contextSources.push({ source: 'sandbox', text: `
+# Sandboxed Execution (Active)
+- run_shell commands execute inside a sandbox boundary (${info.exec_mode} backend${info.degraded_reason ? ` — DEGRADED: ${info.degraded_reason}` : ''}).
+- Filesystem: the workspace root is writable; paths outside the workspace are read-only unless sandbox.writablePaths grants access; permissions.denyPaths remain denied.
+- Network: ${egressDesc}.
+- Sandbox denials are reported as [SANDBOX_VIOLATION] tool errors — do NOT retry the blocked operation; choose an approach that stays inside the boundary.
+` });
       }
 
-      const fullSystemPrompt = contextParts.join('\n');
+      const budgeted = applyContextBudget(contextSources, resolveContextBudget());
+      this._contextBudgetReport = budgeted.report;
+      this.reportContextBudget(budgeted.report);
+
+      const fullSystemPrompt = budgeted.texts.join('\n');
       messages.unshift({ role: 'system', content: fullSystemPrompt });
+    } else {
+      // Restored/resumed history already carries a system message — the
+      // injection guard still accounts for it (and re-trims it if the
+      // budget shrank since the original assembly).
+      const sysIndex = messages.findIndex((m) => m.role === 'system');
+      const budgeted = applyContextBudget(
+        [{ source: 'system', text: messages[sysIndex].content }],
+        resolveContextBudget(),
+      );
+      this._contextBudgetReport = budgeted.report;
+      if (budgeted.texts.length > 0 && budgeted.texts[0] !== messages[sysIndex].content) {
+        messages[sysIndex] = { ...messages[sysIndex], content: budgeted.texts[0] };
+        this.reportContextBudget(budgeted.report);
+      }
     }
 
     // Add user message
@@ -913,7 +1200,19 @@ export class Agent {
     const livelockLimit = this.options.livelockThreshold ?? (this.options.autoApprove ? 3 : 0);
     let harmonyRepromptCount = 0;
     const MAX_HARMONY_REPROMPTS = 2;
-    let forceToolChoice = false;
+    let zeroMutationReprompts = 0;
+    // Re-prompt budget for the zero-mutation completion guard (#448).
+    // Env override follows the SC_MAX_ITERATIONS convention; invalid
+    // values fall back to the default, 0 disables the guard.
+    const zeroMutationRepromptBudget = (() => {
+      const raw = parseInt(process.env.SC_ZERO_MUTATION_REPROMPTS ?? '', 10);
+      return Number.isNaN(raw) ? 2 : Math.max(0, raw);
+    })();
+    const unattendedRun = Boolean(this.options.autoApprove) || this.options.permissionMode === 'unlimited';
+    // Snapshot the worktree before the first LLM call so the guard can
+    // detect mutations made through unclassified paths (e.g. a shell
+    // heredoc write the command classifier missed).
+    const runGitStateBefore = unattendedRun ? getWorkspaceGitState(this.options.workspaceRoot) : null;
     const toolsUsed: Array<{name: string; success: boolean; error?: string; args?: Record<string, unknown>}> = [];
 
     // Reset first chunk flag for new run
@@ -958,6 +1257,7 @@ export class Agent {
 
       iterations++;
       this._iterations = iterations;
+      this._totalIterations++;
 
       // CRITICAL: Validate, compress, prune, and auto-correct message sequence before sending to LLM.
       // Compression+pruning keeps the context window and request size within limits for long runs.
@@ -988,7 +1288,7 @@ export class Agent {
         reqEstTokens += est;
         this.tokenTracker.addInput(est);
       }
-      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
+      this.audit?.emit({ type: 'llm_request', iteration: iterations, model: this._phaseModel ?? this.options.config.model.model, messages: messages.length, est_tokens: reqEstTokens });
       const llmStartTime = Date.now();
 
       // Show thinking indicator on first iteration
@@ -1002,7 +1302,12 @@ export class Agent {
         response = await this.provider.chatCompletion(
           {
             messages,
-            tools: ALL_TOOLS.map((t) => t.definition),
+            // #424 read-only phases (planner/reviewer) never see mutating
+            // tools in the schema — defense in depth alongside the dispatch
+            // gate in executeTool.
+            tools: ALL_TOOLS
+              .filter((t) => !readOnlyPhase || !READ_ONLY_PHASE_DENIED_TOOLS.has(t.definition.function.name))
+              .map((t) => t.definition),
             // Respect the configured transport mode. Some OpenAI-compatible
             // providers return empty streamed tool deltas while non-streaming
             // responses contain valid tool calls.
@@ -1014,7 +1319,7 @@ export class Agent {
         this.provider.setLastCallWasError(false);
       } catch (err) {
         this.provider.setLastCallWasError(true);
-        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
+        this.audit?.emit({ type: 'llm_response', iteration: iterations, model: this._phaseModel ?? this.options.config.model.model, duration_ms: Date.now() - llmStartTime, status: 'error', error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
         throw err;
       }
 
@@ -1032,8 +1337,27 @@ export class Agent {
           this.tokenTracker.addOutput(est);
         }
       }
+      // #424: provider-reported usage supersedes the chars/4 estimates above —
+      // fold the difference into the tracker so totals and per-role buckets
+      // reflect real counts whenever the API reports them.
+      if (response.usage) {
+        const promptTok = response.usage.prompt_tokens;
+        const completionTok = response.usage.completion_tokens;
+        if (typeof promptTok === 'number' && promptTok !== reqEstTokens) {
+          this.tokenTracker.addInput(promptTok - reqEstTokens);
+        }
+        if (typeof completionTok === 'number' && completionTok !== resEstTokens) {
+          this.tokenTracker.addOutput(completionTok - resEstTokens);
+          resEstTokens = completionTok;
+        }
+        const cached = response.usage.prompt_tokens_details?.cached_tokens;
+        if (typeof cached === 'number' && cached > 0) {
+          this.tokenTracker.addCached(cached);
+        }
+      }
+      this.phaseTracker.noteServed(this.provider.providerUsed);
       this.audit?.emit({
-        type: 'llm_response', iteration: iterations, model: this.options.config.model.model,
+        type: 'llm_response', iteration: iterations, model: this._phaseModel ?? this.options.config.model.model,
         duration_ms: Date.now() - llmStartTime, status: 'ok',
         content_bytes: response.content?.length ?? 0, tool_calls: response.tool_calls?.length ?? 0,
         est_tokens: resEstTokens,
@@ -1055,11 +1379,13 @@ export class Agent {
         } catch { /* checkpoint is best-effort */ }
       }
 
-      // Add assistant response to history
+      // Add assistant response to history (#472: masked copy — the model can
+      // echo secrets it saw in tool output into content or write_file args).
+      // `response` itself stays raw: tool_calls execute verbatim below.
       const assistantMessage: Message = {
         role: 'assistant',
-        content: response.content,
-        tool_calls: response.tool_calls,
+        content: typeof response.content === 'string' ? redactSecrets(response.content) : response.content,
+        tool_calls: response.tool_calls?.map(redactToolCall),
       };
       messages.push(assistantMessage);
 
@@ -1121,7 +1447,7 @@ export class Agent {
           const recovered = recoverHarmonyToolCalls(response.content);
           if (recovered.length > 0) {
             response.tool_calls = recovered;
-            assistantMessage.tool_calls = recovered;
+            assistantMessage.tool_calls = recovered.map(redactToolCall);
             if (!this.options.quiet) {
               this.log(chalk.yellow(`\n  │ ♻️  Recovered ${recovered.length} tool call(s) from Harmony markup in content`));
             }
@@ -1195,7 +1521,7 @@ export class Agent {
             this.emitToolError(toolName, parseError);
             this.log(chalk.gray(`  │ ${chalk.red('✗')} ${toolName}: ${parseError}`));
             this.audit?.emit({ type: 'tool_result', name: toolName, success: false, phase: 'args_parse', error: parseError.slice(0, 200) });
-            toolsUsed.push({name: toolName, success: false, error: parseError});
+            toolsUsed.push({name: toolName, success: false, error: redactSecrets(parseError)});
             return {
               role: 'tool' as const,
               content: `Error: ${parseError}`,
@@ -1204,9 +1530,26 @@ export class Agent {
             };
           }
 
+          // #424 read-only phase gate: the schema already hides the obvious
+          // mutating tools, but git/run_shell are dual-purpose — reject
+          // invocations classified as mutating at dispatch time.
+          if (readOnlyPhase && isMutatingToolCall(toolName, args)) {
+            const denied = `Tool call denied: ${toolName} is mutating and this phase is read-only (planner/reviewer phases may inspect but never modify the workspace).`;
+            this.emitToolError(toolName, denied);
+            this.log(chalk.gray(`  │ ${chalk.red('✗')} ${denied}`));
+            this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, phase: 'read_only_phase', error: denied.slice(0, 200) });
+            toolsUsed.push({name: toolName, success: false, error: redactSecrets(denied), args});
+            return {
+              role: 'tool' as const,
+              content: `Error: ${denied}`,
+              tool_call_id: toolCall.id,
+              name: toolName,
+            };
+          }
+
           const toolStartTime = Date.now();
           try {
-            verboseToolCall(toolName, args);
+            verboseToolCall(toolName, redactDeep(args));
 
             // Emit tool start event
             this.emitToolStart(toolName, args);
@@ -1223,7 +1566,7 @@ export class Agent {
               this.log(chalk.gray(`  │    ${chalk.green('✓')} ${toolName}`));
             } else {
               this.log(chalk.gray(`  │ 🔧 Using tool: ${toolName}`));
-              this.log(chalk.gray(`  │    Args: ${JSON.stringify(args)}`));
+              this.log(chalk.gray(`  │    Args: ${JSON.stringify(redactDeep(args))}`));
               this.log(chalk.gray(`  │ ${chalk.green('✓')} Tool completed`));
             }
 
@@ -1243,7 +1586,7 @@ export class Agent {
             this.audit?.emit({ type: 'tool_result', iteration: iterations, name: toolName, success: false, duration_ms: Date.now() - toolStartTime, error: errorMsg.slice(0, 200) });
 
             this.log(chalk.gray(`  │ ${errorIcon} ${toolName} failed: ${errorMsg}`));
-            toolsUsed.push({name: toolName, success: false, error: errorMsg, args});
+            toolsUsed.push({name: toolName, success: false, error: redactSecrets(errorMsg), args});
 
             // Enrich error with contextual analysis so the LLM can respond intelligently
             const enhanced = enhanceError(toolName, errorMsg, this.shellInfo.type);
@@ -1281,18 +1624,27 @@ export class Agent {
           return `${start}\n\n[... Tool output compressed: ${content.length} chars → 8000 chars to prevent memory saturation ...]\n\n${end}`;
         }
 
-        // Push all results to messages
+        // Push all results to messages — and account tool-output context
+        // spend (#422): raw vs post-compression estimated tokens.
+        // #472: every tool result crosses the shared redaction layer before
+        // entering history — this is the boundary that keeps secrets out of
+        // the provider context, sessions, checkpoints, and manifests.
+        let toolOutRequested = 0;
+        let toolOutInjected = 0;
         for (let i = 0; i < toolResults.length; i++) {
           const result = toolResults[i];
-          result.content = compressResult(result.content);
+          toolOutRequested += estimateTokens(result.content);
+          result.content = compressResult(redactSecrets(result.content));
           if (i === toolResults.length - 1 && hasToolCallsWithoutContent) {
             // Append the nudge/instruction directly to the last tool result content.
             // This maintains the strict API role sequence (user -> assistant -> tool -> assistant)
             // for picky API gateways (e.g. Anthropic, NVIDIA NIM) while still prompting the model for synthesis.
             result.content += '\n\n[Instruction: Analyze the tool results above. If the task is not yet complete, proceed with the next steps or tool calls to complete the task. Otherwise, summarize the results for the user in natural language. If there were errors, explain what happened and take action to fix them.]';
           }
+          toolOutInjected += estimateTokens(result.content);
           messages.push(result);
         }
+        this.recordToolOutputSpend(toolOutRequested, toolOutInjected);
 
         // Summary for multiple tools
         if (isMultiple) {
@@ -1316,7 +1668,9 @@ export class Agent {
         // text response is fine (legit final answer ends the loop at 1) —
         // only a streak reaching the threshold is a livelock.
         consecutiveNoToolResponses++;
-        if (livelockLimit > 0 && consecutiveNoToolResponses >= livelockLimit) {
+        // #424: planner/reviewer phases legitimately emit consecutive prose
+        // responses — the livelock guard does not apply to them.
+        if (!suppressGuards && livelockLimit > 0 && consecutiveNoToolResponses >= livelockLimit) {
           const lastOutput = content.trim().slice(0, 300);
           throw new Error(
             `[SC_LIVELOCK] Model produced ${consecutiveNoToolResponses} consecutive responses ` +
@@ -1338,6 +1692,7 @@ export class Agent {
         const hasFailurePhrase = /\b(does not compile|compilation error|syntax error|cannot find|unable to|not compile|build fail)/i.test(content);
 
         const shouldSelfHeal = (
+          !suppressGuards &&
           !isConversational &&
           !isShortResponse &&
           (isDeferring || isFutureIntention || hasFailurePhrase || (hasErrorIndicators && hasToolRun))
@@ -1377,6 +1732,42 @@ export class Agent {
           });
           if (!this.options.quiet) {
             this.log(chalk.yellow(`\n  │ 🔧 Auto-continuing (${selfHealCount}/${MAX_SELF_HEAL}) — forcing fix...`));
+          }
+          continue;
+        }
+
+        // Zero-mutation completion guard (#448): an unattended run whose
+        // prompt requests workspace changes must not end its turn having
+        // executed zero mutating tools — weak/auto-routed models narrate a
+        // plan or paste the fix as prose and the run exits SCC_NO_CHANGES
+        // with nothing applied (failure signature scc:zero-mutations:*).
+        // Re-prompt a bounded number of times; afterwards the turn ends
+        // normally and the caller still gets the documented no-changes
+        // exit contract. An explicit no-changes verdict is honored.
+        const mutatingCalls = toolsUsed.reduce(
+          (n, t) => n + (t.success && isWorkspaceMutatingToolCall(t.name, t.args) ? 1 : 0),
+          0
+        );
+        if (
+          !suppressGuards &&
+          unattendedRun &&
+          zeroMutationReprompts < zeroMutationRepromptBudget &&
+          mutatingCalls === 0 &&
+          expectsWorkspaceMutation(userMessage) &&
+          !declaresNoChangesNeeded(content) &&
+          !hasWorktreeChanges(runGitStateBefore, getWorkspaceGitState(this.options.workspaceRoot))
+        ) {
+          zeroMutationReprompts++;
+          messages.push({
+            role: 'user',
+            content:
+              `[ZERO-MUTATION ${zeroMutationReprompts}/${zeroMutationRepromptBudget} — iteration ${iterations}] ` +
+              `The turn is about to end, but this run produced ZERO workspace changes — no write_file, edit_file, mutating git operation, or mutating run_shell command was executed. ` +
+              `The task requires modifying the workspace. Do NOT describe or paste the fix in prose — apply it now using the tools. ` +
+              `If the task is genuinely read-only, or the requested change is already present, state explicitly that no changes are required and explain why.`,
+          });
+          if (!this.options.quiet) {
+            this.log(chalk.yellow(`\n  │ 🔧 Zero-mutation turn blocked (${zeroMutationReprompts}/${zeroMutationRepromptBudget}) — forcing execution...`));
           }
           continue;
         }
@@ -1441,13 +1832,13 @@ export class Agent {
     // Compact fallback warning for iteration limit
     if (hitIterationLimit) {
       this.log(chalk.gray(`\n  ⚠️  Maximum iteration limit (${MAX_ITERATIONS}) reached`));
-      if (hadErrors) console.log(chalk.gray(`  ${failedTools.length} error(s) encountered. The task may be incomplete.`));
+      if (hadErrors) this.log(chalk.gray(`  ${failedTools.length} error(s) encountered. The task may be incomplete.`));
     }
 
     // Warning for repeated errors (loop detection)
     if (hasRepeatedErrors && !taskCompleted) {
       this.log(chalk.gray('\n  ⚠️  Detected repeated errors (possible infinite loop):'));
-      repeatedErrors.forEach(([errorKey, count]) => console.log(chalk.gray(`  ${count}x: ${errorKey.substring(0, 50)}...`)));
+      repeatedErrors.forEach(([errorKey, count]) => this.log(chalk.gray(`  ${count}x: ${errorKey.substring(0, 50)}...`)));
       this.log(chalk.gray('  The agent attempted the same failing operation multiple times.'));
     }
 

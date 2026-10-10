@@ -57,7 +57,7 @@ Filesystem / Shell
 ## Technical Stack
 
 - **TypeScript**: Strict mode for type safety
-- **Node.js 18+**: Native fetch, no external HTTP library
+- **Node.js 20+**: Native fetch, no external HTTP library
 - **Commander.js**: CLI framework
 - **Streaming**: Server-Sent Events for real-time responses
 - **Cross-platform**: Works on Windows, Linux, macOS

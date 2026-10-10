@@ -16,6 +16,9 @@ import { runDoctor } from './commands/doctor.js';
 import { showConfig } from './utils/config-display.js';
 import { setVerboseLevel, verbose } from './utils/verbose-logger.js';
 import { classifyError } from './utils/exit-codes.js';
+import { isAgentRole, AGENT_ROLES } from './core/roles.js';
+import type { AgentRole } from './core/roles.js';
+import type { DevcontainerRunInfo } from './core/devcontainer.js';
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('../package.json') as { version: string };
@@ -41,7 +44,7 @@ program
   .option('-v, --verbose', 'Verbose debug logging (use -v, -vv, -vvv for level)')
   .option('--max-tokens <tokens>', 'Max response tokens (number or "unlimited"). Overrides config.')
   .option('--throttle <delay>', 'Enable throttling with min delay in ms (e.g. --throttle 2000) or "auto"')
-  .option('--timeout <ms>', 'Connection timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and provider default.')
+  .option('--timeout <ms>', 'Per-attempt total timeout in ms (e.g. --timeout 180000 for 3 min). Overrides config and SC_PROVIDER_ATTEMPT_TIMEOUT_MS.')
   .option('--resume [ref]', 'Resume a checkpoint: session id, .json path, or "latest" (default when flag is bare)')
   .option('--audit-log <path>', 'Append a JSONL audit event per LLM call and tool execution (headless forensics)')
   .option('--livelock-threshold <n>', 'Abort after N consecutive responses without tool calls (default: 3 with -y, 0 disables)')
@@ -52,9 +55,47 @@ program
   .option('--max-seconds <n>', 'Stop gracefully after N seconds of wall-clock time (env: SC_MAX_SECONDS)')
   .option('--max-total-tokens <n>', 'Stop gracefully when estimated session tokens exceed N (env: SC_MAX_TOTAL_TOKENS)')
   .option('--no-commit', 'Hard-block git mutations inside the session (for orchestrators that own git state)')
+  .option('--devcontainer', 'Run the agent loop inside the repo .devcontainer via the Dev Container CLI (falls back to host when unavailable)')
+  .option('--role <role>', `Pin the headless run to a single orchestration phase: ${AGENT_ROLES.join('|')} (env: SC_ROLE)`)
   .option('--prompt-file <path>', 'Read the prompt from a file (use "-" to read from stdin). Mutually exclusive with the prompt argument.')
   .action(async (prompt: string | undefined, options) => {
     try {
+      // --devcontainer (#421): execute the agent loop inside the repo
+      // devcontainer via `devcontainer up` + `devcontainer exec`. Runs BEFORE
+      // prompt-file resolution so a `--prompt-file -` stdin stream passes
+      // through to the in-container run intact. The SC_DEVCONTAINER remote-env
+      // marker means we already run inside the container — record its evidence
+      // instead of re-orchestrating.
+      let devcontainerRun: DevcontainerRunInfo | undefined;
+      if (options.devcontainer) {
+        const dc = await import('./core/devcontainer.js');
+        if (dc.isInsideDevcontainer(process.env)) {
+          devcontainerRun = dc.insideDevcontainerRunInfo(process.cwd(), process.env);
+          dc.auditDevcontainerEvent(options.auditLog, {
+            phase: 'inside',
+            exec_path: 'devcontainer',
+            status: 'devcontainer',
+            marker: devcontainerRun.marker,
+            hostname: devcontainerRun.hostname,
+            config_path: devcontainerRun.config_path,
+          });
+        } else {
+          const outcome = await dc.orchestrateDevcontainer({
+            workspaceRoot: process.cwd(),
+            argv: process.argv.slice(2),
+            auditLogPath: options.auditLog,
+            quiet: Boolean(options.quiet) || options.outputFormat === 'json',
+            env: process.env,
+          });
+          if (outcome.executed) {
+            // The in-container run owns the manifest/exit contract — propagate.
+            process.exit(outcome.exitCode);
+          } else {
+            devcontainerRun = outcome.runInfo;
+          }
+        }
+      }
+
       // --prompt-file: load the prompt from a file instead of argv (#413).
       // Large prompts passed as argv hit shell quoting/escaping issues and
       // ARG_MAX limits; a file (or stdin) avoids both.
@@ -78,6 +119,33 @@ program
         }
       }
 
+      // Validate --output-format early (before config load, MCP connects,
+      // and plugin loading): unknown formats are a usage error, and json is
+      // a batch contract (#399) — without a prompt there is no run to
+      // summarize.
+      const outputFormat = options.outputFormat ?? 'text';
+      if (outputFormat !== 'text' && outputFormat !== 'json') {
+        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
+        process.exit(1);
+      }
+      if (outputFormat === 'json' && (!prompt || !prompt.trim())) {
+        console.error(chalk.red('Error: --output-format json requires a prompt (or --prompt-file); it is only valid for non-interactive runs'));
+        process.exit(1);
+      }
+
+      // #424: --role/SC_ROLE pins the headless run to one orchestration
+      // phase. An unknown role name is a usage error (distinct from an
+      // invalid role→model *mapping*, which falls back to the default).
+      const roleRaw = (options.role ?? process.env.SC_ROLE) || undefined;
+      let role: AgentRole | undefined;
+      if (roleRaw !== undefined) {
+        if (!isAgentRole(roleRaw)) {
+          console.error(chalk.red(`Error: --role/SC_ROLE must be one of: ${AGENT_ROLES.join(', ')} (got "${roleRaw}")`));
+          process.exit(1);
+        }
+        role = roleRaw;
+      }
+
       // Count -v flags from raw argv
       const verboseCount = (() => {
         let count = 0;
@@ -89,7 +157,7 @@ program
       })();
       setVerboseLevel(verboseCount as any);
 
-      let config = await loadConfig(process.cwd());
+      const config = await loadConfig(process.cwd(), { auditLog: options.auditLog });
 
       // If a profile option is provided, override the active profile in config
       if (options.profile) {
@@ -219,11 +287,6 @@ program
         const { registerPluginTools } = await import('./tools/registry.js');
         registerPluginTools(await loadPluginTools(config.plugins, process.cwd()));
       }
-      const outputFormat = options.outputFormat ?? 'text';
-      if (outputFormat !== 'text' && outputFormat !== 'json') {
-        console.error(chalk.red(`Error: --output-format must be "text" or "json", got "${outputFormat}"`));
-        process.exit(1);
-      }
       // Execution budgets: flag > env var; must be positive integers
       const budgetOpt = (flag: string | undefined, env: string | undefined, name: string): number | undefined => {
         const raw = flag ?? env;
@@ -248,17 +311,25 @@ program
         resumeCheckpoint,
         auditLog: options.auditLog,
         livelockThreshold,
+        devcontainer: devcontainerRun,
         summaryFile: options.summaryFile,
         outputFile: options.outputFile,
         outputFormat,
         maxSteps: budgetOpt(options.maxSteps, process.env.SC_MAX_STEPS, '--max-steps'),
         maxSeconds: budgetOpt(options.maxSeconds, process.env.SC_MAX_SECONDS, '--max-seconds'),
         maxTotalTokens: budgetOpt(options.maxTotalTokens, process.env.SC_MAX_TOTAL_TOKENS, '--max-total-tokens'),
+        role,
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Error: ${errorMsg}`));
-      process.exit(classifyError(err));
+      // Defer exit briefly: the run manifest is an async stdout write that a
+      // hard process.exit() can truncate on pipes (#399). exitCode covers a
+      // natural early exit; the ref'd timer forces termination (MCP children
+      // can otherwise hold the event loop open).
+      const exitCode = classifyError(err);
+      process.exitCode = exitCode;
+      setTimeout(() => process.exit(exitCode), 50);
     }
   });
 

@@ -1,10 +1,12 @@
 import prompts from 'prompts';
 import chalk from 'chalk';
 import type { ProjectConfig } from '../core/types.js';
+import { getGlobalConfigPath } from '../core/config.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { isDangerousCommand, formatDangerousWarning } from './dangerous-commands.js';
+import { ensureSecureDirSync, writeFileSecureSync } from './secure-fs.js';
 import { boxHeader, boxFooter } from './box-drawing.js';
 
 export interface PermissionContext {
@@ -70,9 +72,27 @@ export function isGitMutatingCommand(command: string): string | null {
   return null;
 }
 
+// Mutating tools whose "Always" grant is capped at session scope (#477).
+// Persisting them into the global autoApprove list would silently pre-approve
+// file writes, arbitrary shell commands, git mutations and memory writes for
+// every future project — far beyond the context where the user consented.
+export const SESSION_ONLY_ALWAYS_TOOLS = new Set([
+  'run_shell',
+  'git',
+  'memory_write',
+  'write_file',
+  'edit_file',
+]);
+
 const GIT_MUTATION_DENIED =
   'Git mutations are managed externally (--no-commit / permissions.denyGitMutation). ' +
   'Make filesystem edits only — do not run git add/commit/checkout/push or any git-mutating command.';
+
+const GIT_MUTATION_UNATTENDED_DENIED =
+  'Git-mutating commands via run_shell are refused in unattended mode (-y / --permissions unlimited) — ' +
+  'the dedicated `git` tool owns repo state (use it for status/diff/log/show/branch/add/commit/format). ' +
+  'Do not run git checkout/restore/reset/clean/stash or any other git-mutating command via run_shell: ' +
+  'they can silently revert your own edits before the run ends.';
 
 export async function requestPermission(ctx: PermissionContext): Promise<boolean> {
   // Hard deny first: permissions.denyCommands is a non-interactive blocklist
@@ -103,6 +123,19 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
       if (gitOp) {
         throw new Error(`${gitOp} denied. ${GIT_MUTATION_DENIED}`);
       }
+    }
+  }
+
+  // Hard deny: in unattended runs (-y / --permissions unlimited) the `git` tool
+  // owns repo state. A run_shell `git checkout -- .`, `git restore`, `git reset
+  // --hard`, `git clean -f`, or `git stash` can silently revert the model's own
+  // edits before commit time (#464). Interactive mode is unaffected — the
+  // human approves each command.
+  if (ctx.autoApprove && ctx.toolName === 'run_shell') {
+    const command = (ctx.args.command as string) || '';
+    const gitOp = isGitMutatingCommand(command);
+    if (gitOp) {
+      throw new Error(`${gitOp} refused. ${GIT_MUTATION_UNATTENDED_DENIED}`);
     }
   }
 
@@ -174,14 +207,28 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
     'jwt', 'jwt_token', 'sessionKey', 'session_key',
     'sshKey', 'ssh_key', 'sshPrivateKey',
   ]);
-  const redactedArgs: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(ctx.args)) {
-    redactedArgs[k] = SENSITIVE_KEYS.has(k) ? '***' : v;
-  }
+  // Object.fromEntries defines own properties instead of assigning through
+  // [[Set]] — a '__proto__' key in tool args can't mutate the prototype (#478).
+  const redactedArgs: Record<string, unknown> = Object.fromEntries(
+    Object.entries(ctx.args).map(([k, v]) => [k, SENSITIVE_KEYS.has(k) ? '***' : v])
+  );
   console.log(chalk.gray(`\n${boxHeader('Permission', 2)}`));
   console.log(chalk.gray(`  │ ${chalk.yellow('🔐')} Tool: ${ctx.toolName}`));
   console.log(chalk.gray(`  │    Args: ${JSON.stringify(redactedArgs)}`));
   console.log(chalk.gray(boxFooter(2)));
+
+  const alwaysSessionOnly = SESSION_ONLY_ALWAYS_TOOLS.has(ctx.toolName);
+  const alwaysChoice = alwaysSessionOnly
+    ? {
+        title: 'Always (this session only)',
+        value: 'always',
+        description: 'Mutating tool — auto-approves until exit; never saved to global config',
+      }
+    : {
+        title: 'Always (save to config)',
+        value: 'always',
+        description: 'Auto-approve forever (saved to global config)',
+      };
 
   const response = await prompts({
     type: 'select',
@@ -189,7 +236,7 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
     message: 'Allow this action?',
     choices: [
       { title: 'Yes (once)', value: 'yes', description: 'Allow this time only' },
-      { title: 'Always (save to config)', value: 'always', description: 'Auto-approve forever' },
+      alwaysChoice,
       { title: 'Session (until exit)', value: 'session', description: 'Auto-approve this session' },
       { title: 'No (deny)', value: 'no', description: 'Deny this action' },
     ],
@@ -204,14 +251,22 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
   }
 
   if (choice === 'always') {
+    // "Always" is capped at session scope for mutating tools (#477): a grant
+    // persisted to the global config would silently pre-approve them in every
+    // future project, including hostile or throwaway repos.
+    if (alwaysSessionOnly) {
+      sessionAutoApprove.add(ctx.toolName);
+      console.log(chalk.yellow(`\n   ⚠️  "${ctx.toolName}" is a mutating tool — auto-approved for this session only.`));
+      console.log(chalk.gray(`   Nothing was written to the global config; mutating tools are never persisted via "Always".\n`));
+      return true;
+    }
+
     // Save to config permanently AND update in-memory config to avoid re-prompting
     try {
-      const configDir = path.join(homedir(), '.sc-agent');
-      const configPath = path.join(configDir, 'config.json');
+      const configPath = getGlobalConfigPath();
+      const configDir = path.dirname(configPath);
 
-      if (!existsSync(configDir)) {
-        mkdirSync(configDir, { recursive: true });
-      }
+      ensureSecureDirSync(configDir);
 
       let configContent: Record<string, unknown> = {};
       if (existsSync(configPath)) {
@@ -226,7 +281,7 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
       if (!permissions.autoApprove.includes(ctx.toolName)) {
         permissions.autoApprove.push(ctx.toolName);
         configContent.permissions = permissions;
-        writeFileSync(configPath, JSON.stringify(configContent, null, 2));
+        writeFileSecureSync(configPath, JSON.stringify(configContent, null, 2));
       }
 
       // Also update in-memory config for immediate effect in this session
@@ -240,7 +295,8 @@ export async function requestPermission(ctx: PermissionContext): Promise<boolean
         }
       }
 
-      console.log(chalk.gray(`\n   ✓ "${ctx.toolName}" auto-approved for this and future sessions\n`));
+      console.log(chalk.gray(`\n   ✓ "${ctx.toolName}" auto-approved for this and future sessions`));
+      console.log(chalk.gray(`   Saved to ${configPath} — remove it from the permissions auto-approve list to revoke\n`));
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.log(chalk.gray(`\n   ⚠️  Could not save to config: ${errorMsg}`));
