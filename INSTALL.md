@@ -2,13 +2,13 @@
 
 ## Prerequisites
 
-- **Node.js** >= 18.0.0 (for native `fetch` support)
+- **Node.js** >= 20.0.0 (tested on 20, 22, 24, and 26 — see `engines` in `package.json`)
 - **npm** or **yarn**
 
 Check your Node version:
 
 ```bash
-node --version  # Should be >= 18.0.0
+node --version  # Should be >= 20.0.0
 ```
 
 If you need to upgrade Node, download it from [nodejs.org](https://nodejs.org) or use a version manager like [nvm](https://github.com/nvm-sh/nvm).

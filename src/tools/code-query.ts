@@ -257,7 +257,7 @@ export const codeQueryTool: Tool = {
       return await analyzeCode(filePath);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Failed to analyze code: ${msg}`);
+      throw new Error(`Failed to analyze code: ${msg}`, { cause: err });
     }
   },
 };

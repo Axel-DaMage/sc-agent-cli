@@ -44,10 +44,14 @@ Switch between profiles with `/profile` command.
 
 ? Allow this action?
 ❯   Yes (once)
-    Always (save to config)
+    Always (this session only)
     Session (until exit)
     No (deny)
 ```
+
+> For mutating tools (`run_shell`, `git`, `memory_write`, `write_file`,
+> `edit_file`) "Always" is capped at session scope and never saved to the
+> global config. Non-mutating tools still offer "Always (save to config)".
 
 ### When to use:
 - ✅ Learning what the agent does
@@ -267,6 +271,23 @@ npm run build          # ✅ SAFE
 ### Config File Location
 `~/.sc-agent/config.json`
 
+### Project scope (`.sc-agent.json`) restrictions — #469
+
+A repository can ship `.sc-agent.json` to anyone who clones it, so project-scope
+config can only **restrict**, never **elevate**:
+
+- `permissions.autoApprove` from a project config is **ignored** (stderr
+  warning + `config.privileged_key_blocked` audit event) — a hostile repo
+  cannot silently auto-approve `run_shell`/`write_file`.
+- `permissions.denyPaths` merges **additively**: project entries are added on
+  top of the global list and global entries can never be removed (a
+  `denyPaths: []` in the project file does *not* wipe the baseline).
+- `permissions.denyCommands` is union-only the same way — a project can add
+  denials but can never erase the shipped credential-read defaults
+  (`denyCommands: []` does not wipe them).
+- The same boundary applies to any config file whose realpath resolves inside
+  the workspace (e.g. an `SC_CONFIG_PATH` pointing into the repo).
+
 ### Example Configuration
 
 **Traditional Mode:**
@@ -371,6 +392,35 @@ When a command is denied, the agent receives an error naming the matched rule so
 
 Typical uses: preventing pushes/merges in agent-driven workers, blocking destructive filesystem commands, and stopping shell-pipe-to-interpreter patterns.
 
+### Shipped defaults: credential-file reads (#471)
+
+The built-in config seeds `denyCommands` with patterns that block the common file-dump verbs over credential material — the shell-side counterpart of the default `denyPaths`:
+
+- `cat|head|tail|more|less|bat *.env*` and `cat .env`
+- `cat|head|tail *.ssh/*` and `cat *id_rsa* / *id_ed25519* / *id_ecdsa* / *id_dsa*`
+- `cat *.key`, `cat *.pem`
+- `cat` of `*.netrc`, `*.npmrc`, `*.aws/credentials`, `*.kube/config`, `*.docker/config.json`, `*.pgpass`, `*.git-credentials`
+- any command mentioning `.sc-agent/config.json` (the agent's own credential store)
+- `source *.env*` / `. *.env*` — sourcing re-injects secrets into the child shell env
+- `*proc*environ` — `/proc/<pid>/environ` would dump the *parent* process env regardless of child-env scrubbing
+
+Two important caveats:
+
+- **These are defaults, not built-ins.** A `denyCommands` list in your *global* config replaces them wholesale — keep or copy these entries when you override. In a *project-scope* `.sc-agent.json` they merge additively instead, so a repo file can add denials but can never remove the shipped protections (#469).
+- **They are best-effort, not a boundary.** An obfuscated command, a reader that isn't listed (`sudo cat`, `python -c`, `cp`), or a differently-named secret file slips past them. The hard guarantees live in the child-environment scrub and `sandbox.*` below — deny rules are tripwires, not walls.
+
+### `run_shell` child environment (#471)
+
+Every `run_shell` command spawns with an **allowlisted environment** — never the agent's `process.env`: PATH, HOME, SHELL, TERM, USER, locale/tmp/XDG, proxy vars, and the Windows basics (SYSTEMROOT, COMSPEC, PATHEXT, …). Credential-shaped names — `SC_*`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY*`, `*_PASSWORD`, `*_AUTH`, `*_CREDENTIALS`, `BEARER` — are stripped **unconditionally**, so `env`/`printenv` inside a spawned command cannot expose provider keys.
+
+```json
+{ "run_shell": { "allowedEnvVars": ["NPM_CONFIG_REGISTRY", "CARGO_TERM_COLOR"] } }
+```
+
+`run_shell.allowedEnvVars` extends the base set **by name** — values still come from your environment, and credential-shaped names are ignored even if listed. Tool output is additionally masked for *known* secret values (credential env vars + configured API keys are replaced with `***`) before it enters the model context.
+
+> **`permissions.denyPaths` does not constrain `run_shell`.** It guards the file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `search_text`) only — the shell has no path layer. Shell-side protection is the env scrub + `denyCommands` + output redaction; enable `sandbox.*` when you need a hard filesystem boundary.
+
 ---
 
 ## Git Mutation Lock: `denyGitMutation` / `--no-commit`
@@ -388,6 +438,43 @@ Or per invocation: `scc chat -yq --no-commit 'implement issue #42'`.
 **Still allowed:** read-only git (`status`, `diff`, `log`, `show`, `git branch`/`git tag` with no extra args) and all non-git tools — the model stays in edit-only mode.
 
 Denied calls return a clear "git is managed externally" error so the model proceeds without retrying git operations.
+
+---
+
+## Tool-Call Sandboxing (`sandbox.*`)
+
+Independent of permission profiles, the optional `sandbox` config block wraps every `run_shell` command in a boundary (filesystem scope, network egress allowlist, optional seccomp). It composes **additively** with the controls above — deny always wins:
+
+- `denyCommands` still rejects matching commands before the sandbox even spawns them.
+- Literal `denyPaths` are masked *inside* the sandbox mount namespace (tmpfs over dirs, `/dev/null` over files); glob deny entries keep working via `resolveSafePath`.
+- `sandbox.writablePaths`/`readOnlyPaths` can widen the fs boundary, but cannot un-deny a `denyPaths` entry.
+- Non-allowlisted egress is rejected by a loopback proxy and logged as a `sandbox_violation` (`{rule, target}`) — surfaced as a structured tool error, in the audit log, and in the run manifest.
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "egressAllowlist": ["api.github.com:443"],
+    "writablePaths": ["cache"],
+    "seccomp": true
+  }
+}
+```
+
+> **Project scope (#469):** while the sandbox is enabled by trusted config, a
+> project `.sc-agent.json` cannot weaken it — `sandbox.*` keys such as
+> `enabled:false`, wider `egressAllowlist`/`writablePaths`, or a repo-shipped
+> `seccompProfile` are dropped with a stderr warning. When the baseline leaves
+> the sandbox off, a project may only opt in/tighten.
+
+See [sandboxing.md](sandboxing.md) for the full profile schema and backend matrix.
+## Unattended Git Guard (`-y` / `--permissions unlimited`)
+
+In unattended runs the dedicated `git` tool owns repo state: `run_shell` refuses **every** git-mutating command — `git checkout --`, `git restore`, `git reset --hard`, `git clean -f`, `git stash`, plus `add`/`commit`/`push`/`pull`/`rebase`/`merge`/`cherry-pick`/`revert`/`tag <args>`/`branch <args>`/`clone`/`init`/`fetch`/`mv`/`rm`/`am`/`apply`/`submodule`/`worktree`/`switch`/`checkout` (including inside `cd x && git …` chains). The refusal error is routed back to the model and steers it to the `git` tool for supported operations (`status`, `diff`, `log`, `show`, `branch`, `add`, `commit`, `format`).
+
+Why: an unattended model that runs `git checkout -- .`/`git restore`/`git reset --hard`/`git clean`/`git stash` can silently revert its own edits before the wrapper commits — the run reports success against a clean tree. Read-only git (`status`, `diff`, `log`, `show`, bare `branch`/`tag`) and all non-git commands stay allowed. Interactive mode is unaffected — the human approves each command.
+
+To block git mutations in **every** mode (orchestrators that own git state externally), use `denyGitMutation` / `--no-commit` above — it additionally disables the `git` tool's `add`/`commit`.
 
 ---
 
