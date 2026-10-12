@@ -239,7 +239,10 @@ The `/permissions` command sets the **overall behavior**, but individual tool pe
 **Individual tool response** (when prompted):
 - Yes (once) - This action only
 - Session (until exit) - This tool for session
-- Always (save to config) - This tool forever
+- Always - Scope depends on the tool: non-mutating tools are saved to the
+  global config ("Always (save to config)"); mutating tools (`run_shell`,
+  `git`, `memory_write`, `write_file`, `edit_file`) are capped at session
+  scope ("Always (this session only)") and are never persisted
 - No (deny) - Deny this action
 
 **Example:**
@@ -255,9 +258,9 @@ Agent wants to run: read_file
 
 Agent wants to run: write_file
 ? Allow this action?
-❯ Always (save to config)
+❯ Always (this session only)
 
-[write_file auto-approves forever, even in future sessions]
+[write_file is mutating — auto-approves until exit; never saved to global config]
 
 Agent wants to run: run_shell
 ? Allow this action?
@@ -315,7 +318,7 @@ You: /permissions  # ⬆ Press up arrow + Enter
 2. **Use unlimited mode** only in isolated development environments
 3. **Review session permissions** before approving "Session (until exit)"
 4. **Clear permissions** when switching contexts (dev → prod)
-5. **Audit config** after selecting "Always (save to config)"
+5. **Audit config** after selecting "Always (save to config)" on non-mutating tools
 
 ---
 

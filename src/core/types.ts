@@ -40,10 +40,66 @@ export interface ModelConfig {
   stream?: boolean;
   top_p?: number;
   topP?: number;
-  timeout?: number; // Connection timeout in ms (overrides provider default)
+  timeout?: number; // Per-attempt total timeout in ms (overrides SC_PROVIDER_ATTEMPT_TIMEOUT_MS; connect bound: SC_PROVIDER_CONNECT_TIMEOUT_MS)
 }
 
 export type PermissionProfile = 'traditional' | 'blacklist';
+
+/**
+ * Sandboxed execution profile for `run_shell` (#423).
+ *
+ * Semantics (per operator contract):
+ * - `enabled`: opt-in, default false. When unset the shell tool runs unsandboxed.
+ * - `egressAllowlist`: `host` or `host:port` entries (`*.` prefix matches a
+ *   domain and its subdomains; `*` allows all egress). Empty/absent list means
+ *   block-all egress except loopback.
+ * - `readOnlyPaths` / `writablePaths`: absolute (or workspace-relative) paths
+ *   layered over the default policy — workspace writable, everything else
+ *   read-only.
+ * - `seccomp`: request syscall filtering; only applied when the platform
+ *   supports it (Linux + bubblewrap). Optional `seccompProfile` points to a
+ *   raw cBPF blob (as produced by `seccomp_export_bpf`) replacing the built-in
+ *   denylist.
+ *
+ * Sandbox rules compose additively with `permissions.denyPaths` /
+ * `permissions.denyCommands`; deny always wins.
+ */
+export interface SandboxConfig {
+  enabled?: boolean;
+  egressAllowlist?: string[];
+  readOnlyPaths?: string[];
+  writablePaths?: string[];
+  seccomp?: boolean;
+  seccompProfile?: string;
+}
+
+/**
+ * `web_fetch` egress policy (#470).
+ *
+ * - `allowlist`: optional `host` | `host:port` | `*.domain[:port]` | `*`
+ *   entries (same syntax as `sandbox.egressAllowlist`). When non-empty,
+ *   every request — and every redirect hop — must match an entry. The list
+ *   only narrows; the private-range block still applies on top unless
+ *   `allowPrivateHosts` is set.
+ * - `allowPrivateHosts`: disables the loopback/private/link-local/reserved
+ *   destination block. Explicit escape hatch for local development
+ *   (e.g. fetching a dev server). Default false.
+ * - `maxBytes`: response body cap in bytes. Bodies are streamed and cut off
+ *   at this limit instead of being buffered whole. Default 5 MiB, clamped
+ *   to 1 KiB–64 MiB.
+ */
+export interface WebFetchConfig {
+  allowlist?: string[];
+  allowPrivateHosts?: boolean;
+  maxBytes?: number;
+}
+
+/**
+ * Multi-model orchestration roles (#424). Each role maps to a
+ * "provider/model" token resolved with the SC_FAILOVER alias semantics
+ * (profile name → known provider → model id on the configured endpoint).
+ */
+export type AgentRole = 'planner' | 'executor' | 'reviewer';
 
 export interface ThrottleConfig {
   enabled: boolean;
@@ -52,6 +108,33 @@ export interface ThrottleConfig {
   afterError: number;           // Extra delay after API error
   maxDelayMs: number;           // Cap for exponential backoff
   mode: 'auto' | 'fixed' | 'exponential';
+}
+
+/**
+ * Context injection mode (#461). 'full' (default) injects the discovered
+ * context files (AGENTS.md / SC-AGENT.md / CLAUDE.md) verbatim; 'skeleton'
+ * replaces that file-content injection with a generated repo map —
+ * per-file symbols, signatures, and import edges — emitted as the
+ * `repo_map` budget source so the agent pulls file bodies via read_file
+ * on demand. `SC_CONTEXT_MODE` overrides the config value.
+ */
+export type ContextMode = 'full' | 'skeleton';
+
+export interface ContextConfig {
+  mode?: ContextMode;
+}
+
+/**
+ * `run_shell` hardening knobs (#471).
+ *
+ * `allowedEnvVars` extends the built-in safe environment a spawned command
+ * receives (PATH, HOME, shell basics — see `utils/env-scrub.ts`). Names are
+ * env var names only (no values); credential-shaped names (`*_API_KEY`,
+ * `*_TOKEN`, `*_SECRET`, `SC_*`, …) are stripped unconditionally and can never
+ * be re-added here.
+ */
+export interface RunShellConfig {
+  allowedEnvVars?: string[];
 }
 
 export interface ProjectConfig {
@@ -63,8 +146,19 @@ export interface ProjectConfig {
     denyGitMutation?: boolean; // hard-block git-mutating ops (orchestrators own git state)
     profile?: PermissionProfile; // Permission behavior profile
   };
+  sandbox?: SandboxConfig; // Sandboxed execution for agent-spawned shell commands (#423)
+  run_shell?: RunShellConfig; // Child-environment hardening for shell commands (#471)
+  webFetch?: WebFetchConfig; // web_fetch SSRF/egress policy (#470)
   profiles?: Record<string, Partial<ModelConfig>>; // Named profiles
   activeProfile?: string;
+  /**
+   * Per-phase model routing for headless runs (#424): planner, executor and
+   * reviewer/judge each map to a "provider/model" alias. All roles optional —
+   * absent or invalid entries fall back to `model.*` (logged as
+   * `role_fallback` in the run manifest).
+   */
+  roles?: Partial<Record<AgentRole, string>>;
+  context?: ContextConfig; // Context injection mode (#461) — default 'full'
   mcp?: {
     servers?: Record<string, {
       command: string;

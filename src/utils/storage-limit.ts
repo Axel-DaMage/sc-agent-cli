@@ -172,27 +172,31 @@ function cleanupEmptyDirs(dirPath: string) {
   }
 }
 
-export function enforceStorageLimit(dirPath: string, autoCleanup = true): boolean {
+export function enforceStorageLimit(dirPath: string, autoCleanup = true, quiet = false): boolean {
   const info = checkStorageLimit(dirPath);
 
   if (!info.needsCleanup) {
     return true; // Within limits
   }
 
-  console.log(chalk.yellow(`\n⚠️  Storage limit exceeded`));
-  console.log(chalk.gray(`  Current: ${formatBytes(info.currentSize)}`));
-  console.log(chalk.gray(`  Limit:   ${formatBytes(info.maxSize)}`));
-  console.log(chalk.gray(`  Usage:   ${info.usagePercent.toFixed(1)}%\n`));
+  // Quiet/headless mode (sc -q, --output-format json): keep stdout reserved
+  // for the run output/manifest — report cleanup progress on stderr.
+  const print = quiet ? console.error : console.log;
+
+  print(chalk.yellow(`\n⚠️  Storage limit exceeded`));
+  print(chalk.gray(`  Current: ${formatBytes(info.currentSize)}`));
+  print(chalk.gray(`  Limit:   ${formatBytes(info.maxSize)}`));
+  print(chalk.gray(`  Usage:   ${info.usagePercent.toFixed(1)}%\n`));
 
   if (autoCleanup) {
-    console.log(chalk.cyan('  Cleaning up oldest files...\n'));
+    print(chalk.cyan('  Cleaning up oldest files...\n'));
 
     const deletedSize = cleanupOldestFiles(dirPath, info.maxSize * 0.9); // Clean to 90%
 
-    console.log(chalk.green(`✓ Cleaned up ${formatBytes(deletedSize)}`));
+    print(chalk.green(`✓ Cleaned up ${formatBytes(deletedSize)}`));
 
     const newInfo = checkStorageLimit(dirPath);
-    console.log(chalk.gray(`  New size: ${formatBytes(newInfo.currentSize)} (${newInfo.usagePercent.toFixed(1)}%)\n`));
+    print(chalk.gray(`  New size: ${formatBytes(newInfo.currentSize)} (${newInfo.usagePercent.toFixed(1)}%)\n`));
 
     return !newInfo.needsCleanup;
   }

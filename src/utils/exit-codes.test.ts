@@ -1,6 +1,23 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { classifyError, EXIT_CODES } from './exit-codes.js';
+import { ProviderFailoverError } from '../core/failover.js';
+
+// #486: the numeric values ARE the contract — wrappers branch on $? alone.
+// Pin them so a renumbering refactor fails unit tests, not just e2e.
+test('EXIT_CODES: the documented numeric contract is pinned', () => {
+  assert.deepEqual(EXIT_CODES, {
+    SUCCESS: 0,
+    ERROR: 1,
+    NO_CHANGES: 10,
+    NOT_ACTIONABLE: 11,
+    PROVIDER_ERROR: 20,
+    AUTH_ERROR: 21,
+    BUDGET_EXCEEDED: 22,
+    LOOP_ABORT: 23,
+    PROVIDER_EXHAUSTED: 24,
+  });
+});
 
 test('classifyError: auth errors → 21', () => {
   for (const msg of [
@@ -36,6 +53,21 @@ test('classifyError: livelock → 23', () => {
 
 test('classifyError: auth takes precedence over generic provider patterns', () => {
   assert.equal(classifyError(new Error('Request timeout; server replied 401')), EXIT_CODES.AUTH_ERROR);
+});
+
+test('classifyError: failover chain exhausted → 24', () => {
+  const err = new ProviderFailoverError([
+    { candidate: 'openai/gpt-4o', attempt: 4, errorClass: 'server_error', retryable: true, status: 503, error: 'API Error 503: down', durationMs: 10 },
+  ], 'server_error');
+  assert.equal(classifyError(err), EXIT_CODES.PROVIDER_EXHAUSTED);
+});
+
+test('classifyError: declared exitCode beats auth-looking message content', () => {
+  // A failover error ending on a 401 is still "chain exhausted" (24), not 21.
+  const err = new ProviderFailoverError([
+    { candidate: 'openai/gpt-4o', attempt: 1, errorClass: 'auth', retryable: false, status: 401, error: 'API Error 401: denied', durationMs: 5 },
+  ], 'auth');
+  assert.equal(classifyError(err), EXIT_CODES.PROVIDER_EXHAUSTED);
 });
 
 test('classifyError: unknown → 1', () => {

@@ -332,7 +332,7 @@ Note: On macOS, Ctrl+C works the same as on other platforms.
 **Problem:** ↑↓ don't navigate history
 
 **Solution:** This is a Node.js readline feature and should work automatically. If not:
-- Make sure you're using Node.js 18+
+- Make sure you're using Node.js 20+
 - Try restarting your terminal
 
 ---

@@ -47,8 +47,15 @@ export function resolveSafePath(
   const denyPatterns = config.permissions?.denyPaths || [];
   if (denyPatterns.length > 0) {
     const ig = ignore().add(denyPatterns);
-    const relativePath = path.relative(wsReal, resolved);
-    if (relativePath && ig.ignores(relativePath)) {
+    // `ignore` expects gitignore-style '/' separators — path.relative emits
+    // '\' on Windows, which would silently bypass nested deny globs there.
+    // Match both the logical path and its realpath so a symlink inside the
+    // workspace cannot mask a deny-listed target (#484).
+    const denied = [resolved, realResolved].some((p) => {
+      const rel = path.relative(wsReal, p).split(path.sep).join('/');
+      return rel !== '' && rel !== '..' && !rel.startsWith('../') && ig.ignores(rel);
+    });
+    if (denied) {
       throw new Error(
         `Access denied: "${inputPath}" matches a deny pattern.\n` +
         `  Denied patterns: ${denyPatterns.join(', ')}\n\n` +

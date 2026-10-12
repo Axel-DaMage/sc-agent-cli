@@ -18,6 +18,7 @@ const SLASH_COMMANDS = [
   '/reload',
   '/clear',
   '/memory',
+  '/remember',
   '/info',
   '/probe',
   '/repo',

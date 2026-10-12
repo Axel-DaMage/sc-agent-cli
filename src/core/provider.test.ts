@@ -1,7 +1,20 @@
-import { test, vi, beforeAll } from 'vitest';
+import { test, vi, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { OpenAICompatibleProvider } from './provider.js';
 import type { ModelConfig } from './types.js';
+
+// Real failover classes, fake backoff — tests assert the retry bound,
+// not wall-clock pacing.
+vi.mock('./failover.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./failover.js')>();
+  return { ...mod, computeRetryDelay: () => 1 };
+});
+
+// The fetch spy is shared across tests — restore it per test so
+// mock.calls[0] is this test's request, not a stale earlier one.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function makeConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
   return {
@@ -204,6 +217,78 @@ test('chatCompletion handles streaming=false without body gracefully', async () 
     stream: false,
   });
   assert.equal(result.content, '');
+});
+
+test('chatCompletion surfaces usage from a non-streamed response (#424)', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+    ok: true,
+    json: () => Promise.resolve({
+      choices: [{ message: { content: 'done' } }],
+      usage: {
+        prompt_tokens: 120,
+        completion_tokens: 30,
+        total_tokens: 150,
+        prompt_tokens_details: { cached_tokens: 12 },
+      },
+    }),
+  } as any);
+
+  const provider = new OpenAICompatibleProvider(makeConfig());
+  const result = await provider.chatCompletion({
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+  });
+
+  assert.equal(result.usage?.prompt_tokens, 120);
+  assert.equal(result.usage?.completion_tokens, 30);
+  assert.equal(result.usage?.prompt_tokens_details?.cached_tokens, 12);
+});
+
+test('chatCompletion requests stream_options.include_usage and captures the usage chunk (#424)', async () => {
+  const usageChunk = `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 4, total_tokens: 13 } })}\n\n`;
+  const chunks = [
+    sseDelta({ role: 'assistant', content: 'ok' }),
+    sseDelta({ content: '' }, 'stop'),
+    usageChunk,
+    'data: [DONE]\n\n',
+  ];
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+
+  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+    ok: true,
+    body: stream,
+  } as any);
+
+  const provider = new OpenAICompatibleProvider(makeConfig());
+  const result = await provider.chatCompletion({
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: true,
+  });
+
+  const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+  assert.deepEqual(body.stream_options, { include_usage: true });
+  assert.equal(result.content, 'ok');
+  assert.equal(result.usage?.prompt_tokens, 9);
+  assert.equal(result.usage?.completion_tokens, 4);
+});
+
+test('chatCompletion does not send stream_options for non-streamed requests', async () => {
+  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+    ok: true,
+    json: () => Promise.resolve({ choices: [{ message: { content: 'x' } }] }),
+  } as any);
+
+  const provider = new OpenAICompatibleProvider(makeConfig());
+  await provider.chatCompletion({ messages: [{ role: 'user', content: 'hi' }], stream: false });
+
+  const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+  assert.equal(body.stream_options, undefined);
 });
 
 test('chatCompletion retries on 429 with backoff', async () => {

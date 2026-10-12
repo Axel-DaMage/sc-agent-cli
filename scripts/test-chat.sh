@@ -14,4 +14,4 @@ echo "  - 'read the package.json file'"
 echo "  - 'search for the word Agent in all TypeScript files'"
 echo ""
 
-node bin/sc-agent.js chat "$@"
+node bin/sc.js chat "$@"
