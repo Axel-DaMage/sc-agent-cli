@@ -10,13 +10,21 @@
   },
   "scripts": {
     "prepare": "husky",
+    "ensure-deps": "node scripts/ensure-deps.mjs",
+    "prebuild": "node scripts/ensure-deps.mjs typescript",
     "build": "tsc",
+    "predev": "node scripts/ensure-deps.mjs typescript",
     "dev": "tsc --watch",
     "start": "node bin/sc.js",
     "clean": "rm -rf dist",
+    "pretest": "node scripts/ensure-deps.mjs vitest",
     "test": "vitest run",
+    "pretest:watch": "node scripts/ensure-deps.mjs vitest",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "pretest:coverage": "node scripts/ensure-deps.mjs vitest",
+    "test:coverage": "vitest run --coverage",
+    "pretest:e2e": "node scripts/ensure-deps.mjs vitest",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "lint-staged": {
     "*.ts": [

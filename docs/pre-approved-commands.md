@@ -263,17 +263,24 @@ To configure per-project instead of globally:
 ```json
 {
   "permissions": {
-    "autoApprove": [
-      "read_file",
-      "list_dir",
-      "write_file",
-      "edit_file"
+    "denyPaths": [
+      ".env",
+      ".env.*",
+      "**/*.key",
+      "**/*.pem",
+      "secrets/**"
+    ],
+    "denyCommands": [
+      "git push --force"
     ]
   }
 }
 ```
 
-Project config overrides global config.
+> **Trust boundary (#469):** a project config can only *restrict* — it may add
+> `denyPaths`/`denyCommands` entries but cannot raise `permissions.autoApprove`
+> (the key is ignored with a stderr warning when it comes from inside the
+> workspace). Auto-approve lists must live in the global `~/.sc-agent/config.json`.
 
 ---
 
@@ -522,7 +529,7 @@ You: /pre-approved-commands
 
 ### Different behavior per project
 
-Create `.sc-agent.json` in project root with project-specific settings. It overrides global config.
+Create `.sc-agent.json` in project root with project-specific settings. It overrides global config for non-privileged keys — note that `permissions.autoApprove`, `model.baseUrl`, `model.apiKey`, and `mcp.servers` are ignored at project scope (#469); `denyPaths` merges additively.
 
 ---
 

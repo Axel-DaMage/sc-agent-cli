@@ -56,6 +56,190 @@ When multiple API keys are set, the priority is:
 
 ## Behavior Configuration
 
+### SC_BASE_URL
+
+Overrides `model.baseUrl` — the OpenAI-compatible endpoint the agent talks to. Wins over the active profile and both config files; the value is validated with `new URL()` at startup, so an invalid URL fails config validation with the same error as a bad config-file value.
+
+**Default:** unset (uses `model.baseUrl` from config/profile)
+
+```bash
+# Point at a different compatible endpoint without editing config
+export SC_BASE_URL="https://models.github.ai/inference"
+scc chat
+```
+
+---
+
+### SC_MODEL
+
+Overrides `model.model` — the model id sent to the provider. Wins over the active profile and both config files.
+
+**Default:** unset (uses `model.model` from config/profile)
+
+```bash
+export SC_MODEL="openai/gpt-4.1"
+scc chat
+```
+
+---
+
+### SC_PROFILE
+
+Overrides `activeProfile` — selects which entry of `profiles` is merged into `model.*`. Only applied when the named profile exists in `config.profiles`; an unknown name is ignored.
+
+**Default:** unset (uses `activeProfile` from config)
+
+```bash
+export SC_PROFILE=nvidia
+scc chat
+```
+
+---
+
+### SC_FAILOVER
+
+Ordered csv of `provider/model` candidates forming the provider cascade. The configured model is always tried first; each `SC_FAILOVER` entry is then tried in declared order when a candidate fails persistently.
+
+**Default:** empty (single configured model, no cascade)
+
+```bash
+# Try the configured model, then gpt-4o-mini on OpenAI, then Claude on Anthropic
+export SC_FAILOVER="openai/gpt-4o-mini,anthropic/claude-sonnet-4-6"
+```
+
+How `provider` resolves (in order):
+
+1. A matching name in `config.profiles` (uses that profile's `baseUrl`, `apiKey`, etc.)
+2. A known provider name (`openai`, `anthropic`, `nvidia`, `groq`, `together`, `ollama`, `lmstudio`) mapped to its canonical base URL
+3. Otherwise — a token with no `/` (e.g. `llama3.1`) or a prefix matching neither of the above (e.g. `meta/llama-3.3-70b-instruct`) — the whole token is treated as a model id on the configured endpoint
+
+Behavior:
+
+- **Cascade on:** retry exhaustion (4 attempts) or non-retryable errors (400/401/403, incl. unsupported model)
+- **Transient failures** (connect/attempt timeouts, `ECONNRESET`/`ETIMEDOUT`, HTTP 429, HTTP 500/502/503/504) retry first with bounded backoff (2s→4s→8s +20% jitter, capped at 8s)
+- The primary credential is never forwarded to a different host — each candidate resolves its own key (`SC_API_KEY`, host-matched env key, or its profile's `apiKey`)
+- Once the cascade advances to a working candidate, later calls in the run stick to it
+- If every candidate is exhausted, the run exits with code **24** and the manifest reports `terminalResolution: "provider_error"`, `errorClass`, and the `attempts` array per candidate
+
+---
+
+### SC_ROLE
+
+Pin a headless run to a single orchestration phase (`--role` flag equivalent). Valid values: `planner`, `executor`, `reviewer`. With no `SC_ROLE`/`--role`, a configured `roles` map expands the run into the full planner → executor → reviewer pipeline.
+
+**Default:** unset (full pipeline when `config.roles` is present, classic single-phase run otherwise)
+
+```bash
+# Run only the executor phase, on its configured role model
+SC_ROLE=executor scc chat -yq "implement issue #424"
+```
+
+See [non-interactive-mode.md](non-interactive-mode.md#multi-model-orchestration-roles-424) for the `roles` config, phase policies, and manifest fields.
+
+---
+
+### SC_ROLE_MAX_FIXES
+
+Bounds the reviewer ↔ executor consensus loop in orchestrated runs. When the reviewer phase emits `VERDICT: request_changes`, its comments are sent back to the executor for a rework round and the reviewer re-reviews — at most this many rounds. A terminal `request_changes` at the bound is recorded in the manifest's `review` block (`verdict`, `fix_rounds`, `max_fixes`).
+
+**Default:** `3` (`0` disables the rework loop — the review still runs once and its verdict is recorded)
+
+```bash
+# Allow up to 5 executor rework rounds per run
+export SC_ROLE_MAX_FIXES=5
+scc chat -yq "implement issue #462"
+```
+
+---
+
+### SC_PROVIDER_CONNECT_TIMEOUT_MS
+
+Maximum time (ms) to wait for response headers on each provider attempt.
+
+**Default:** `30000` (30s). Expiry counts as a retryable transport failure.
+
+---
+
+### SC_PROVIDER_ATTEMPT_TIMEOUT_MS
+
+Maximum total time (ms) per provider attempt, including the streamed body.
+
+**Default:** `120000` (120s). Overridden by `model.timeout` in config or `--timeout`. Expiry counts as a retryable transport failure.
+
+### SC_ZERO_MUTATION_REPROMPTS
+
+Controls how many times the agent may block a turn that would complete with zero workspace mutations in unattended mode (`-y` / `--permissions unlimited`). When a prompt requests file changes but the model answers with prose only, the run is re-prompted to execute mutating tools instead of silently finishing as `SCC_NO_CHANGES`.
+
+**Default:** `2` (`0` disables the guard)
+
+```bash
+# Give a weak/routed model more chances to actually apply changes
+export SC_ZERO_MUTATION_REPROMPTS=4
+scc chat -yq 'implement issue #446'
+```
+
+---
+
+### SC_CONTEXT_BUDGET_TOKENS
+
+Caps the estimated size of the assembled system-prompt injection — the base system prompt plus shell guide, repo profile, project context (`AGENTS.md`/`CLAUDE.md`/policy file), repo map (skeleton mode), persistent memories, and the non-interactive note. Tokens are estimated with the shared chars/4 heuristic.
+
+**Default:** unset (no cap; per-source spend is still accounted in the run manifest)
+
+When the assembly exceeds the cap, sources are trimmed deterministically — lowest priority first:
+
+1. `memory` — persistent cross-session memories
+2. `repo_profile` — probed toolchain hints
+3. `project_context` — `AGENTS.md` / `CLAUDE.md` / policy file
+4. `repo_map` — generated repo skeleton (only present with `context.mode=skeleton`)
+5. `shell` — shell environment guide
+6. `non_interactive` — auto-approve note (only present with `-y`)
+7. `system` — base system prompt (trimmed last, never fully dropped)
+
+A source whose full size exceeds the remaining overflow is truncated (head kept, `[... context source "X" trimmed ...]` marker appended); a source entirely covered by the overflow is dropped. Trims are never silent: a visible warning is printed, a `[CONTEXT_BUDGET]` line is emitted under `-v`, an audit event is recorded (with `--audit-log`), and the run manifest carries a `context_budget` block with `budget_tokens`, `requested_tokens`, `injected_tokens`, `over_budget`, and per-source `tokens_requested`/`tokens_injected`/`truncated`/`dropped`.
+
+The manifest's `context_budget.sources` also carries a cumulative `tool_outputs` line — estimated tokens of tool results injected into the conversation during the run (tool outputs are bounded by the >10KB auto-compressor and history pruning, not by this cap).
+
+```bash
+# Keep the injected context under ~8k estimated tokens
+export SC_CONTEXT_BUDGET_TOKENS=8000
+scc chat -yq 'implement issue #422'
+```
+
+---
+
+### SC_CONTEXT_MODE
+
+Selects how workspace knowledge is injected into the system prompt. Valid values: `full`, `skeleton`.
+
+**Default:** `full` (or `context.mode` in `.sc-agent.json` / `config.json` — env wins)
+
+- `full` — injects discovered context files (`AGENTS.md`/`SC-AGENT.md`/`CLAUDE.md` + `settings.policyFile`) verbatim as the `project_context` source.
+- `skeleton` — replaces that whole-file injection with a generated repo map: per-file exported symbols, signatures, and import edges extracted with dependency-free regex heuristics (JS/TS, Python, Go, Rust, SQL, JVM, C-family, C#, Ruby, PHP, shell, Swift, Lua — keyed by extension). The map is emitted as the `repo_map` injection source (bounded: ~60 lines/file, capped file count and total lines) and counts toward `SC_CONTEXT_BUDGET_TOKENS` like every other source. File bodies are pulled on demand via the existing `read_file` tool — the skeleton names exact workspace-relative paths. An explicitly configured `settings.policyFile` is still injected in skeleton mode.
+
+```bash
+# .sc-agent.json
+{ "context": { "mode": "skeleton" } }
+
+# or via env
+SC_CONTEXT_MODE=skeleton scc chat -yq 'refactor the provider layer'
+```
+
+---
+
+### SC_POLICY_FILE
+
+Overrides `settings.policyFile` — an extra policy/doctrine file injected into the `project_context` system-prompt source alongside the auto-discovered `AGENTS.md`/`SC-AGENT.md`/`CLAUDE.md` files. The path is resolved against the workspace root and must land inside it (deny-path rules still apply); unreadable or denied files are skipped silently. An explicitly set policy file is still injected when `context.mode`/`SC_CONTEXT_MODE` is `skeleton`.
+
+**Default:** unset
+
+```bash
+export SC_POLICY_FILE=docs/TEAM-RULES.md
+scc chat
+```
+
+---
+
 ### SC_MAX_ITERATIONS
 
 Controls the maximum number of agent iterations before stopping. Each iteration consists of:
@@ -171,6 +355,226 @@ scc chat
 ```
 
 Oldest files are automatically deleted to bring usage down to 90% of the limit.
+
+---
+
+### SC_MAX_STEPS
+
+Stops the run gracefully after N tool executions. Equivalent of `--max-steps <n>`; the flag wins when both are set. Must be a positive integer — anything else is a usage error.
+
+**Default:** unset (no step cap)
+
+```bash
+SC_MAX_STEPS=25 scc chat -yq "triage issue #123"
+```
+
+On exhaustion the run ends gracefully: partial work is preserved, an `SC_BUDGET_EXCEEDED steps` marker is emitted, and the process exits with code **22** (see [Headless output markers](#headless-output-markers)).
+
+---
+
+### SC_MAX_SECONDS
+
+Stops the run gracefully after N seconds of wall-clock time. Equivalent of `--max-seconds <n>`; the flag wins when both are set. Must be a positive integer — anything else is a usage error.
+
+**Default:** unset (no time cap)
+
+```bash
+SC_MAX_SECONDS=300 scc chat -yq "update the changelog"
+```
+
+On exhaustion the run emits `SC_BUDGET_EXCEEDED seconds` and exits with code **22**.
+
+---
+
+### SC_MAX_TOTAL_TOKENS
+
+Stops the run gracefully when estimated session tokens exceed N (chars/4 heuristic, covering the whole conversation including tool outputs). Equivalent of `--max-total-tokens <n>`; the flag wins when both are set. Must be a positive integer — anything else is a usage error.
+
+**Default:** unset (no token cap)
+
+```bash
+SC_MAX_TOTAL_TOKENS=200000 scc chat -yq "refactor the provider layer"
+```
+
+On exhaustion the run emits `SC_BUDGET_EXCEEDED tokens` and exits with code **22**.
+
+---
+
+### SC_HUD
+
+Forces the interactive status bar (HUD) on or off — wins over `settings.hud` in config.
+
+**Accepted values:** `1` or `true` (case-insensitive) enables; any other set value (e.g. `0`, `false`) disables.
+
+**Default:** unset (uses `settings.hud`, which defaults to enabled)
+
+```bash
+# Run interactively without the status bar
+SC_HUD=false scc chat
+```
+
+---
+
+### SC_DEBUG_METRICS
+
+When set (any non-empty value), enables extra `[METRICS]` diagnostic lines for agent-loop decisions — context-injection loaded/skipped with sizes and mode, and self-heal activation/skip reasons. They go through the stderr verbose channel, so combine with `-v` to see them.
+
+**Default:** unset (metrics lines suppressed)
+
+```bash
+SC_DEBUG_METRICS=1 scc chat -v "implement the feature"
+```
+
+---
+
+### SC_DEVCONTAINER_AGENT_CMD
+
+Command executed inside the devcontainer when `scc chat --devcontainer` runs the agent loop via `devcontainer exec`.
+
+**Default:** `scc`
+
+```bash
+# Use a differently-named/global install inside the container
+export SC_DEVCONTAINER_AGENT_CMD="sc"
+scc chat -yq --devcontainer "run the test suite"
+```
+
+### SC_DEVCONTAINER
+
+Remote-env marker **set automatically** by `devcontainer exec` — it marks that the current process already runs inside the container (recursion guard + run-manifest evidence). Do not set it on the host.
+
+---
+
+### SC_SANDBOX
+
+Force the tool-call sandbox on or off for every `run_shell` invocation — wins over `sandbox.enabled` in config so CI runners can enforce the boundary without editing files.
+
+**Accepted values:** `1|true|on|yes` enable, `0|false|off|no` disable. Anything else fails config validation at startup.
+
+```bash
+# Full profile from .sc-agent.json (egressAllowlist, paths, seccomp) applies
+SC_SANDBOX=1 scc chat -yq 'implement issue #423'
+```
+
+See [sandboxing.md](sandboxing.md) for the `sandbox` config block.
+
+---
+
+### SC_CONFIG_PATH
+
+Overrides the location of the global config file. Reads (`loadConfig`) and writes (`saveConfig`, `sc config-init`, `/profile` defaults) all honor it. Useful for tests, CI, and containers that must not touch the host's `~/.sc-agent/config.json`.
+
+**Default:** `~/.sc-agent/config.json`
+
+```bash
+# Run the agent against a throwaway config
+export SC_CONFIG_PATH=/tmp/sc-agent/config.json
+scc chat
+```
+
+> **Trust scope (#469):** the override only keeps *global* privileges when its
+> canonical realpath lands **outside** the workspace. A `SC_CONFIG_PATH` that
+> resolves inside the workspace root (symlinks resolved first) ships with the
+> repo and is filtered exactly like `.sc-agent.json` — see
+> [Workspace-trust boundary](#workspace-trust-boundary-469) below.
+
+
+
+
+## Workspace trust boundary (#469)
+
+Not an env var — a config-layer rule worth knowing when wiring environments:
+
+`loadConfig` merges `.sc-agent.json` (workspace root) **and any config file
+whose realpath resolves inside the workspace** at *project scope*. A repo can
+ship those files to anyone who clones it, so project scope may only
+**restrict**, never **elevate**:
+
+| Key | Project scope behavior |
+|-----|------------------------|
+| `mcp.servers` | **dropped** — server `command`/`args` would otherwise spawn at session start |
+| `plugins` | **dropped** — specifiers are `import()`'ed at session start (in-process RCE) |
+| `settings.formatters` | **dropped** — a shell-command list the `git` tool runs on commit/format |
+| `model.baseUrl` | **dropped** — would reroute the provider endpoint and exfiltrate `Authorization: Bearer` keys |
+| `model.apiKey` | **dropped** — would inject an attacker credential |
+| `profiles.*.baseUrl` / `profiles.*.apiKey` | **dropped** — same endpoint/credential primitive via `activeProfile`, `--profile`, or `SC_PROFILE` |
+| `permissions.autoApprove` | **dropped** — would silently auto-approve mutating tools |
+| `permissions.denyPaths` / `permissions.denyCommands` | **union-only** — project entries are added; the global baseline can never be removed |
+| `sandbox.*` | **dropped while the baseline sandbox is enabled** — a project can opt in or tighten (`enabled:true`, `seccomp:true`), never weaken an active boundary (`enabled:false`, wider allowlists, `seccompProfile`) |
+
+Each dropped key prints one stderr line —
+`sc-agent: ignoring project-scope privileged key "<key.path>" from <file>` —
+and, when `--audit-log <path>` is enabled, appends a
+`config.privileged_key_blocked` event (`{key_path, source_file, scope}`) to the
+JSONL stream. A project config that declares `denyPaths`/`denyCommands` also
+prints a `project <key> merge additively; global entries cannot be removed`
+note (one per declared key). All of this is soft-failure: the run continues
+normally (exit 0).
+
+
+
+
+
+
+
+## Child Process Environment (#471)
+
+Commands the agent spawns (`run_shell`, `mcp_validate`, MCP stdio servers) do **not** inherit your full shell environment. They receive a fixed safe base — `PATH`, `HOME`, `SHELL`, `TERM`, `USER`, `LANG`/locale vars, `TMPDIR`/`TMP`/`TEMP`, `XDG_*` dirs, proxy vars, and the Windows essentials (`SYSTEMROOT`, `COMSPEC`, `PATHEXT`, `USERPROFILE`, …) — plus any names you opt in via config:
+
+```json
+{ "run_shell": { "allowedEnvVars": ["NPM_CONFIG_REGISTRY", "CARGO_TERM_COLOR"] } }
+```
+
+- Credential-shaped names — `SC_*`, `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY*`, `*_PASSWORD`, `*_AUTH`, `*_CREDENTIALS`, `BEARER` — are stripped **unconditionally**. `allowedEnvVars` can never re-add them, so `env`/`printenv` inside a spawned command cannot expose provider keys.
+- MCP servers (`mcp.servers.*`) receive the same scrubbed base plus whatever you wire explicitly into that server's `env` map — set server credentials there.
+- `run_shell` output is additionally masked for *known* secret values (credential env vars + configured API keys are replaced with `***`) before it reaches the model context.
+- `permissions.denyPaths` only guards the file tools — it does **not** constrain shell commands. `denyCommands` ships defaults that block `cat .env`-style credential reads (see [permission-profiles.md](permission-profiles.md#hard-deny-list-denycommands)); `sandbox.enabled` is the hard boundary when you need stronger isolation (see [sandboxing.md](sandboxing.md)).
+
+
+
+---
+
+### SC_CHECKPOINT_DIR
+
+Overrides the directory where execution checkpoints are stored — the `<sessionId>.json` snapshots saved every 5 agent iterations for crash recovery (`/checkpoint save`, `/checkpoint list`, `findLatestCheckpoint`). Useful for tests, CI, and sandboxed runs that must not touch the host's `~/.sc-agent/checkpoints/`.
+
+**Default:** `~/.sc-agent/checkpoints`
+
+```bash
+# Keep checkpoint writes inside an ephemeral workspace
+export SC_CHECKPOINT_DIR=/tmp/sc-agent/checkpoints
+scc chat
+```
+
+---
+
+### SC_SESSIONS_DIR
+
+Overrides the root directory where per-session artifacts are written — each run gets `<sessionId>/session.json` (redacted message trace) and `<sessionId>/status.json`. Useful for tests, CI, and sandboxed runs that must not touch the host's `~/.sc-agent/sessions/`.
+
+**Default:** `~/.sc-agent/sessions`
+
+```bash
+# Capture session traces on a throwaway mount
+export SC_SESSIONS_DIR=/tmp/sc-agent/sessions
+scc chat
+```
+
+---
+
+---
+
+## Headless Output Markers
+
+These are **not** environment inputs — the CLI *emits* them so wrappers and CI can branch on run outcomes without parsing prose. In `--output-format text` they go to stdout; with `--output-format json` stdout is reserved for the run manifest, so markers move to stderr. The exit codes they pair with are specified in [`docs/exit-codes.md`](exit-codes.md) (canonical contract).
+
+### SC_BUDGET_EXCEEDED
+
+Emitted as `SC_BUDGET_EXCEEDED <dimension>` when an execution budget (`--max-steps`/`SC_MAX_STEPS`, `--max-seconds`/`SC_MAX_SECONDS`, `--max-total-tokens`/`SC_MAX_TOTAL_TOKENS`) ends the run gracefully — `<dimension>` is one of `steps`, `seconds`, `tokens`. Pairs with exit code **22** and `resolution: "budget_exceeded"` in the run manifest.
+
+### SC_LIVELOCK
+
+Emitted as an `[SC_LIVELOCK]`-prefixed error when the agent aborts on a tool livelock — N consecutive non-empty model responses with no tool calls (default 3 under `-y`/`--permissions unlimited`; `--livelock-threshold 0` disables). Pairs with exit code **23**.
 
 ---
 

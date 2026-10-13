@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
+import { buildChildEnv } from '../utils/env-scrub.js';
 
 /**
  * Minimal MCP client — stdio transport, newline-delimited JSON-RPC 2.0 (#401).
@@ -50,7 +51,10 @@ export class McpClient {
     this.child = spawn(this.spec.command, this.spec.args ?? [], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      env: { ...process.env, ...(this.spec.env ?? {}) },
+      // #471 — MCP servers are third-party code: they get the scrubbed base
+      // environment plus whatever the operator wired explicitly in
+      // mcp.servers.<name>.env, never the ambient credential set.
+      env: { ...buildChildEnv(process.env), ...(this.spec.env ?? {}) },
     });
 
     this.child.stdout!.on('data', (d: Buffer) => this.onData(d));

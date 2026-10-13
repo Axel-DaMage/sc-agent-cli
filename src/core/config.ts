@@ -1,10 +1,42 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import chalk from 'chalk';
 import type { ProjectConfig } from './types.js';
+import { ensureSecureDir, warnOnLoosePermissions, writeFileSecure } from '../utils/secure-fs.js';
+import { AuditLogger } from '../utils/audit-log.js';
 
 const CONFIG_DIR = path.join(homedir(), '.sc-agent');
-const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+
+// #471 — shipped defaults for permissions.denyCommands: best-effort parity
+// with denyPaths (which only constrains the file tools). Blocks the common
+// file-dump verbs over credential material via run_shell — `cat .env`,
+// `cat *.key|*.pem`, `cat ~/.ssh/*`, reads of the agent's own config, and
+// sourcing `.env` (which re-introduces secrets into the child env). Also
+// `/proc/<pid>/environ`, which would dump the *parent* env regardless of
+// child-env scrubbing. A user's own denyCommands list replaces these —
+// keep/copy them when overriding (see docs/permission-profiles.md).
+const DEFAULT_DENY_COMMANDS: string[] = [
+  // Credential-store / dotenv file reads via the common dump verbs.
+  'cat *.env*', 'head *.env*', 'tail *.env*', 'more *.env*', 'less *.env*', 'bat *.env*',
+  'cat .env', // substring form also catches `cat .env` piped/chained further
+  'cat *.key', 'cat *.pem',
+  // SSH private keys live under ~/.ssh (glob covers ~, relative, absolute).
+  'cat *.ssh/*', 'head *.ssh/*', 'tail *.ssh/*',
+  // Other well-known credential files.
+  'cat *.netrc', 'cat *.npmrc', 'cat *.aws/credentials', 'cat *.kube/config',
+  'cat *.docker/config.json', 'cat *.pgpass', 'cat *.git-credentials',
+  'cat *id_rsa*', 'cat *id_ed25519*', 'cat *id_ecdsa*', 'cat *id_dsa*',
+  // The agent's own credential store — any verb, not just the dumpers.
+  '.sc-agent/config.json',
+  // Sourcing .env re-injects secrets into the scrubbed child environment.
+  'source *.env*', '. *.env*',
+  // /proc/<pid>/environ (incl. $PPID) bypasses child-env scrubbing entirely.
+  // Glob form (not a bare "/environ" substring) so ./environments/… stays legal.
+  '*proc*environ',
+];
 
 const DEFAULT_CONFIG: ProjectConfig = {
   model: {
@@ -18,6 +50,7 @@ const DEFAULT_CONFIG: ProjectConfig = {
   permissions: {
     autoApprove: ['read_file', 'list_dir', 'search_text', 'web_fetch', 'memory_read', 'code_query', 'repo_probe'],
     denyPaths: ['.env', '.env.*', '**/*.key', '**/*.pem'],
+    denyCommands: DEFAULT_DENY_COMMANDS,
   },
   profiles: {
     ollama: {
@@ -73,16 +106,56 @@ const API_KEY_REQUIREMENTS = [
   },
 ] as const;
 
-export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
+export interface LoadConfigOptions {
+  /**
+   * Override the global config file (`~/.sc-agent/config.json`). `null` skips
+   * the global layer entirely — tests rely on this so a developer's real
+   * global config (e.g. an activeProfile) cannot leak into assertions.
+   */
+  globalConfigPath?: string | null;
+  /**
+   * `--audit-log` path (#469): privileged keys dropped from project-scope
+   * config files are appended as `config.privileged_key_blocked` events.
+   * The stderr warning is unconditional; without this flag nothing is
+   * persisted.
+   */
+  auditLog?: string;
+}
+
+export async function loadConfig(
+  projectRoot?: string,
+  options?: LoadConfigOptions
+): Promise<ProjectConfig> {
   let config = structuredClone(DEFAULT_CONFIG);
 
-  // Load global config
-  config = await mergeConfigFile(config, CONFIG_PATH, 'global');
+  // Audit sink for blocked project-scope keys (#469). Same best-effort
+  // contract as the run's logger — an unwritable path must not block loading.
+  let audit: AuditLogger | undefined;
+  if (options?.auditLog) {
+    try {
+      audit = new AuditLogger(options.auditLog);
+    } catch {
+      audit = undefined;
+    }
+  }
+
+  // Load global config (explicit option wins; otherwise SC_CONFIG_PATH/default)
+  const globalConfigPath =
+    options?.globalConfigPath === undefined ? getGlobalConfigPath() : options.globalConfigPath;
+  if (globalConfigPath !== null) {
+    // #469 — trust boundary: an explicitly selected config file whose
+    // canonical path lands INSIDE the workspace shipped with the repo, so it
+    // only earns project-scope privileges (privileged keys are filtered).
+    // A path resolving outside stays user-trusted at global scope.
+    const scope: ConfigScope =
+      projectRoot && isInsideWorkspace(globalConfigPath, projectRoot) ? 'project' : 'global';
+    config = await mergeConfigFile(config, globalConfigPath, scope, audit);
+  }
 
   // Load project-local config if in a project
   if (projectRoot) {
     const projectConfigPath = path.join(projectRoot, '.sc-agent.json');
-    config = await mergeConfigFile(config, projectConfigPath, 'project');
+    config = await mergeConfigFile(config, projectConfigPath, 'project', audit);
   }
 
   // Override active profile from environment variable if set
@@ -119,11 +192,44 @@ export async function loadConfig(projectRoot?: string): Promise<ProjectConfig> {
     config.model.model = envModel;
   }
 
+  // Override base URL from environment variable (validated in validateConfig)
+  const envBaseUrl = process.env.SC_BASE_URL;
+  if (envBaseUrl) {
+    config.model.baseUrl = envBaseUrl;
+  }
+
   // Override policy file from environment variable
   const envPolicyFile = process.env.SC_POLICY_FILE;
   if (envPolicyFile) {
     if (!config.settings) config.settings = {};
     config.settings.policyFile = envPolicyFile;
+  }
+
+  // Override sandbox enablement (#423). SC_SANDBOX wins over config so CI
+  // runners can force the boundary on (or off) without editing config files.
+  const envSandbox = process.env.SC_SANDBOX;
+  if (envSandbox !== undefined && envSandbox.trim() !== '') {
+    const v = envSandbox.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(v)) {
+      config.sandbox = { ...config.sandbox, enabled: true };
+    } else if (['0', 'false', 'off', 'no'].includes(v)) {
+      config.sandbox = { ...config.sandbox, enabled: false };
+    } else {
+      throw new Error(`Invalid SC_SANDBOX value "${envSandbox}" (expected on/off, true/false, 1/0)`);
+    }
+  }
+
+  // Context injection mode (#461): SC_CONTEXT_MODE wins over
+  // `context.mode` in config so CI/headless runs can force the repo-map
+  // skeleton without editing files.
+  const envContextMode = process.env.SC_CONTEXT_MODE;
+  if (envContextMode !== undefined && envContextMode.trim() !== '') {
+    const v = envContextMode.trim().toLowerCase();
+    if (v === 'full' || v === 'skeleton') {
+      config.context = { ...config.context, mode: v };
+    } else {
+      throw new Error(`Invalid SC_CONTEXT_MODE value "${envContextMode}" (expected 'full' or 'skeleton')`);
+    }
   }
 
   // Validate required fields
@@ -157,70 +263,410 @@ export function validateConfig(config: ProjectConfig): void {
       `Set model.apiKey in config, ${missingApiKeyRule.envVar}, or SC_API_KEY.`
     );
   }
+
+  // Sandbox profile shape (#423). Semantics (host:port parsing) are enforced
+  // again at sandbox resolve time; here we fail fast on malformed structure.
+  const sandbox = config.sandbox;
+  if (sandbox !== undefined) {
+    if (sandbox === null || typeof sandbox !== 'object' || Array.isArray(sandbox)) {
+      throw new Error('Invalid sandbox config: expected an object');
+    }
+    if (sandbox.enabled !== undefined && typeof sandbox.enabled !== 'boolean') {
+      throw new Error('Invalid sandbox.enabled: expected a boolean');
+    }
+    if (sandbox.seccomp !== undefined && typeof sandbox.seccomp !== 'boolean') {
+      throw new Error('Invalid sandbox.seccomp: expected a boolean');
+    }
+    if (sandbox.seccompProfile !== undefined && typeof sandbox.seccompProfile !== 'string') {
+      throw new Error('Invalid sandbox.seccompProfile: expected a file path string');
+    }
+    for (const key of ['egressAllowlist', 'readOnlyPaths', 'writablePaths'] as const) {
+      const list = sandbox[key];
+      if (list === undefined) continue;
+      if (!Array.isArray(list) || list.some((e) => typeof e !== 'string' || !e.trim())) {
+        throw new Error(`Invalid sandbox.${key}: expected an array of non-empty strings`);
+      }
+    }
+    for (const entry of sandbox.egressAllowlist ?? []) {
+      // host | host:port | [v6] | [v6]:port | *.domain[:port] | *
+      const body = entry.trim();
+      if (/[\s/@]/.test(body)) {
+        throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": expected host or host:port`);
+      }
+      const portPart = /^\[[0-9a-fA-F:]+\]:(\d+)$/.exec(body)?.[1]
+        ?? (/^[^[\]]*:(\d+)$/.test(body) ? body.slice(body.lastIndexOf(':') + 1) : undefined);
+      if (portPart !== undefined) {
+        const port = Number(portPart);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": port must be 1-65535`);
+        }
+      } else if (body.includes(':') && !body.startsWith('[') && (body.match(/:/g) ?? []).length === 1) {
+        throw new Error(`Invalid sandbox.egressAllowlist entry "${entry}": malformed port`);
+      }
+    }
+  }
+
+  // run_shell block (#471) — allowedEnvVars is a list of env var *names*.
+  const runShell = config.run_shell;
+  if (runShell !== undefined) {
+    if (runShell === null || typeof runShell !== 'object' || Array.isArray(runShell)) {
+      throw new Error('Invalid run_shell config: expected an object');
+    }
+    const vars = runShell.allowedEnvVars;
+    if (vars !== undefined) {
+      const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
+      if (!Array.isArray(vars) || vars.some((v) => typeof v !== 'string' || !envName.test(v))) {
+        throw new Error('Invalid run_shell.allowedEnvVars: expected an array of env var names (A-Z, 0-9, _)');
+      }
+    }
+  }
+
+  // Context injection mode block (#461).
+  const context = config.context;
+  if (context !== undefined) {
+    if (context === null || typeof context !== 'object' || Array.isArray(context)) {
+      throw new Error('Invalid context config: expected an object');
+    }
+    if (context.mode !== undefined && context.mode !== 'full' && context.mode !== 'skeleton') {
+      throw new Error(`Invalid context.mode: "${context.mode}" (expected 'full' or 'skeleton')`);
+    }
+  }
+
+  // web_fetch egress policy (#470). Entries share the sandbox.egressAllowlist
+  // grammar (host | host:port | [v6][:port] | *.domain[:port] | *); matching
+  // semantics are enforced at fetch time.
+  const webFetch = config.webFetch;
+  if (webFetch !== undefined) {
+    if (webFetch === null || typeof webFetch !== 'object' || Array.isArray(webFetch)) {
+      throw new Error('Invalid webFetch config: expected an object');
+    }
+    if (webFetch.allowPrivateHosts !== undefined && typeof webFetch.allowPrivateHosts !== 'boolean') {
+      throw new Error('Invalid webFetch.allowPrivateHosts: expected a boolean');
+    }
+    if (webFetch.maxBytes !== undefined) {
+      if (
+        typeof webFetch.maxBytes !== 'number' ||
+        !Number.isFinite(webFetch.maxBytes) ||
+        webFetch.maxBytes < 1024
+      ) {
+        throw new Error('Invalid webFetch.maxBytes: expected a number >= 1024 (bytes)');
+      }
+    }
+    if (webFetch.allowlist !== undefined) {
+      if (!Array.isArray(webFetch.allowlist) || webFetch.allowlist.some((e) => typeof e !== 'string' || !e.trim())) {
+        throw new Error('Invalid webFetch.allowlist: expected an array of non-empty strings');
+      }
+      for (const entry of webFetch.allowlist) {
+        const body = entry.trim();
+        if (/[\s/@]/.test(body)) {
+          throw new Error(`Invalid webFetch.allowlist entry "${entry}": expected host or host:port`);
+        }
+        const portPart = /^\[[0-9a-fA-F:]+\]:(\d+)$/.exec(body)?.[1]
+          ?? (/^[^\[\]]*:(\d+)$/.test(body) ? body.slice(body.lastIndexOf(':') + 1) : undefined);
+        if (portPart !== undefined) {
+          const port = Number(portPart);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            throw new Error(`Invalid webFetch.allowlist entry "${entry}": port must be 1-65535`);
+          }
+        } else if (body.includes(':') && !body.startsWith('[') && (body.match(/:/g) ?? []).length === 1) {
+          throw new Error(`Invalid webFetch.allowlist entry "${entry}": malformed port`);
+        }
+      }
+    }
+  }
 }
 
+/**
+ * Resolve the global config file path. `SC_CONFIG_PATH` relocates it (useful
+ * for tests, CI, and containers that must not touch the host's
+ * `~/.sc-agent/config.json`); unset or blank falls back to the default.
+ * Resolved at call time so every entry point — `loadConfig`, `saveConfig`,
+ * `config-init`, `/profile` "save as default" — honors the override.
+ */
 export function getGlobalConfigPath(): string {
-  return CONFIG_PATH;
+  const envPath = process.env.SC_CONFIG_PATH?.trim();
+  return envPath ? envPath : DEFAULT_CONFIG_PATH;
 }
 
 export async function saveConfig(config: ProjectConfig, global = true): Promise<void> {
-  const targetPath = global ? CONFIG_PATH : path.join(process.cwd(), '.sc-agent.json');
+  const targetPath = global ? getGlobalConfigPath() : path.join(process.cwd(), '.sc-agent.json');
 
   if (global) {
-    await mkdir(CONFIG_DIR, { recursive: true });
+    await ensureSecureDir(path.dirname(targetPath));
   }
 
-  await writeFile(targetPath, JSON.stringify(config, null, 2), 'utf-8');
+  // Config files can carry API keys — owner-only mode in both scopes (#475).
+  await writeFileSecure(targetPath, JSON.stringify(config, null, 2));
 }
 
 export async function initConfig(force = false): Promise<void> {
-  // Check if config exists and don't overwrite unless force=true
+  const configPath = getGlobalConfigPath();
+  // Check if config exists and don't overwrite unless force=true.
+  // (existsSync never throws ENOENT — a plain throw inside a try/catch that
+  // filters on `code` would swallow the "already exists" guard entirely.)
   if (!force) {
-    try {
-      const fs = await import('fs');
-      if (fs.existsSync(CONFIG_PATH)) {
-        throw new Error(`Config already exists at ${CONFIG_PATH}. Use --force to overwrite.`);
-      }
-    } catch (err: unknown) {
-      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err;
-      }
+    const fs = await import('fs');
+    if (fs.existsSync(configPath)) {
+      throw new Error(`Config already exists at ${configPath}. Use --force to overwrite.`);
     }
   }
 
   await saveConfig(DEFAULT_CONFIG, true);
 }
 
-function deepMerge<T extends object>(base: T, override: Partial<T>, visited?: WeakSet<object>): T {
+// Keys that must never be copied from a config file (#478): `result[key] = v`
+// goes through [[Set]], so `__proto__` invokes the prototype setter and mutates
+// the merged object's prototype instead of creating an own property.
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function deepMerge<T extends object>(
+  base: T,
+  override: Partial<T>,
+  visited?: WeakSet<object>,
+  source?: string,
+  keyPath = ''
+): T {
+  const result = { ...base } as Record<string, unknown>;
+  // Non-object overrides (e.g. a config file containing `null` or a bare
+  // primitive) contribute nothing — for...in silently ignored them too.
+  if (override == null || typeof override !== 'object') {
+    return result as T;
+  }
   if (visited?.has(override)) {
     throw new Error('Circular reference detected in config merge');
   }
   const seen = visited || new WeakSet<object>();
   seen.add(override);
-  const result = { ...base };
-  for (const key in override) {
-    const val = override[key];
+  // Object.keys iterates own enumerable keys only — a polluted prototype on
+  // `override` must not leak inherited members into the merged config.
+  for (const key of Object.keys(override)) {
+    if (UNSAFE_MERGE_KEYS.has(key)) {
+      console.warn(
+        chalk.yellow(
+          `⚠️  Ignoring unsafe config key "${keyPath}${key}"${source ? ` in ${source}` : ''}`
+        )
+      );
+      continue;
+    }
+    const val = (override as Record<string, unknown>)[key];
     if (val !== undefined) {
       if (typeof val === 'object' && !Array.isArray(val) && val !== null) {
         result[key] = deepMerge(
           (result[key] as Record<string, unknown>) || {},
           val as Record<string, unknown>,
-          seen
-        ) as T[Extract<keyof T, string>];
+          seen,
+          source,
+          `${keyPath}${key}.`
+        );
       } else {
-        result[key] = val as T[Extract<keyof T, string>];
+        result[key] = val;
       }
     }
   }
-  return result;
+  return result as T;
 }
 
 type ConfigScope = 'global' | 'project';
 
+// #469 — workspace trust boundary: does `filePath` resolve INSIDE the
+// workspace? Both sides are canonicalized (realpath) before the containment
+// test so symlinks in either direction cannot blur the boundary: a symlink
+// inside the workspace pointing out keeps global privileges, while an
+// outside path that resolves in is untrusted.
+function isInsideWorkspace(filePath: string, workspaceRoot: string): boolean {
+  let wsReal: string;
+  try {
+    wsReal = realpathSync(workspaceRoot);
+  } catch {
+    wsReal = path.resolve(workspaceRoot);
+  }
+
+  const resolved = path.resolve(filePath);
+  let real: string;
+  try {
+    real = realpathSync(resolved);
+  } catch {
+    real = resolved; // missing files merge nothing — scope is moot anyway
+  }
+
+  // Windows filesystems are case-insensitive; realpathSync does not
+  // normalize casing, so compare lowercase there.
+  const [ws, target] =
+    process.platform === 'win32' ? [wsReal.toLowerCase(), real.toLowerCase()] : [wsReal, real];
+  // A filesystem-root workspace ("/", "C:\") already ends with the separator.
+  const wsPrefix = ws.endsWith(path.sep) ? ws : ws + path.sep;
+  return target === ws || target.startsWith(wsPrefix);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * #469 — project-scope config may only *restrict*, never elevate. A
+ * repository ships `.sc-agent.json` (and any config file that resolves
+ * inside the workspace) to anyone who clones it, so keys that could spawn
+ * processes, reroute the provider endpoint, inject credentials, or widen
+ * unattended approvals are dropped before merge — one stderr line per key
+ * plus a `config.privileged_key_blocked` audit event when --audit-log is on.
+ *
+ * `permissions.denyPaths`/`permissions.denyCommands` are the exception: they
+ * merge additively (a project may add deny entries, never remove baseline
+ * ones — `denyCommands: []` would otherwise erase the shipped #471
+ * credential-read protections).
+ *
+ * Blocking `model.baseUrl`/`model.apiKey` alone would be cosmetic — the
+ * same primitive is reachable through `profiles.*` when `activeProfile`,
+ * `--profile`, or `SC_PROFILE` selects it — so the profile entries are
+ * stripped of endpoint/credential keys too.
+ */
+function filterProjectScopeConfig(
+  parsed: Partial<ProjectConfig>,
+  baseline: ProjectConfig,
+  sourceFile: string,
+  audit: AuditLogger | undefined
+): Partial<ProjectConfig> {
+  if (!isPlainObject(parsed)) {
+    return parsed; // deepMerge already contributes nothing for non-objects
+  }
+  const record = parsed as Record<string, unknown>;
+
+  const block = (keyPath: string): void => {
+    console.warn(
+      chalk.yellow(`sc-agent: ignoring project-scope privileged key "${keyPath}" from ${sourceFile}`)
+    );
+    audit?.emit({
+      type: 'config.privileged_key_blocked',
+      key_path: keyPath,
+      source_file: sourceFile,
+      scope: 'project',
+    });
+  };
+
+  // model.baseUrl reroutes the provider endpoint — env/global API keys would
+  // then be sent as `Authorization: Bearer` to an attacker host. model.apiKey
+  // injects an attacker credential.
+  if (isPlainObject(record.model)) {
+    for (const key of ['baseUrl', 'apiKey']) {
+      if (Object.hasOwn(record.model, key)) {
+        block(`model.${key}`);
+        delete record.model[key];
+      }
+    }
+  }
+
+  // Same primitive via indirection: a profile's baseUrl/apiKey applies when
+  // the profile is activated (activeProfile, --profile, SC_PROFILE).
+  if (isPlainObject(record.profiles)) {
+    for (const [name, profile] of Object.entries(record.profiles)) {
+      if (!isPlainObject(profile)) continue;
+      for (const key of ['baseUrl', 'apiKey']) {
+        if (Object.hasOwn(profile, key)) {
+          block(`profiles.${name}.${key}`);
+          delete profile[key];
+        }
+      }
+    }
+  }
+
+  // mcp.servers command/args are spawned verbatim at session start — RCE.
+  if (isPlainObject(record.mcp) && Object.hasOwn(record.mcp, 'servers')) {
+    block('mcp.servers');
+    delete record.mcp.servers;
+  }
+
+  // plugins entries are dynamic-import()'ed at session start — in-process
+  // code execution, the same RCE primitive as mcp.servers.
+  if (Object.hasOwn(record, 'plugins')) {
+    block('plugins');
+    delete record.plugins;
+  }
+
+  // settings.formatters is a shell-command list run by the `git` tool on
+  // commit/format — attacker-controlled process execution via config, same
+  // class as mcp.servers/plugins.
+  if (isPlainObject(record.settings) && Object.hasOwn(record.settings, 'formatters')) {
+    block('settings.formatters');
+    delete record.settings.formatters;
+  }
+
+  // Sandbox boundary (#423): while the baseline has the sandbox ON, every
+  // project-side sandbox key can only weaken it — "sandbox off", a wider
+  // egress/writable allowlist, or a repo-shipped seccomp profile. Those are
+  // dropped; idempotent tightenings (enabled:true / seccomp:true) merge.
+  // When the baseline leaves the sandbox off, a project opting in can only
+  // restrict, so the block passes through untouched.
+  if (isPlainObject(record.sandbox) && baseline.sandbox?.enabled === true) {
+    const TIGHTENING = new Map<string, unknown>([
+      ['enabled', true],
+      ['seccomp', true],
+    ]);
+    for (const key of Object.keys(record.sandbox)) {
+      if (TIGHTENING.has(key) && TIGHTENING.get(key) === record.sandbox[key]) continue;
+      block(`sandbox.${key}`);
+      delete record.sandbox[key];
+    }
+  }
+
+  if (Object.hasOwn(record, 'permissions')) {
+    if (!isPlainObject(record.permissions)) {
+      // A non-object permissions value would replace the whole block —
+      // wiping the denyPaths/denyCommands baseline. Escalation by shape.
+      block('permissions');
+      delete record.permissions;
+    } else {
+      // autoApprove widens which tools run without prompting — never merges.
+      if (Object.hasOwn(record.permissions, 'autoApprove')) {
+        block('permissions.autoApprove');
+        delete record.permissions.autoApprove;
+      }
+
+      // denyPaths/denyCommands are union-only: a project may add deny
+      // entries (legitimate hardening) but can never express removals, so
+      // the shipped/global baseline always survives. `[]` while baseline
+      // entries exist reads as a wipe attempt — the stderr note covers it
+      // and the same blocked-key audit event records it.
+      for (const key of ['denyPaths', 'denyCommands'] as const) {
+        if (!Object.hasOwn(record.permissions, key)) continue;
+        const declared = record.permissions[key];
+        const baselineDeny = baseline.permissions?.[key] ?? [];
+        if (Array.isArray(declared)) {
+          console.warn(
+            chalk.yellow(
+              `sc-agent: project ${key} merge additively; global entries cannot be removed (from ${sourceFile})`
+            )
+          );
+          if (declared.length === 0 && baselineDeny.length > 0) {
+            audit?.emit({
+              type: 'config.privileged_key_blocked',
+              key_path: `permissions.${key}`,
+              source_file: sourceFile,
+              scope: 'project',
+            });
+          }
+          record.permissions[key] = [
+            ...new Set([
+              ...baselineDeny,
+              ...declared.filter((entry): entry is string => typeof entry === 'string'),
+            ]),
+          ];
+        } else {
+          // A non-array value would *replace* the baseline — block it.
+          block(`permissions.${key}`);
+          delete record.permissions[key];
+        }
+      }
+    }
+  }
+
+  return parsed;
+}
+
 async function mergeConfigFile(
   config: ProjectConfig,
   configPath: string,
-  scope: ConfigScope
+  scope: ConfigScope,
+  audit?: AuditLogger
 ): Promise<ProjectConfig> {
   let data: string;
 
@@ -238,6 +684,11 @@ async function mergeConfigFile(
     );
   }
 
+  // The global config holds credentials — flag + repair loose modes (#475).
+  if (scope === 'global') {
+    warnOnLoosePermissions(configPath, 'Global config');
+  }
+
   let parsedConfig: Partial<ProjectConfig>;
   try {
     parsedConfig = JSON.parse(data) as Partial<ProjectConfig>;
@@ -250,7 +701,11 @@ async function mergeConfigFile(
     );
   }
 
-  return deepMerge(config, parsedConfig);
+  if (scope === 'project') {
+    parsedConfig = filterProjectScopeConfig(parsedConfig, config, configPath, audit);
+  }
+
+  return deepMerge(config, parsedConfig, undefined, configPath);
 }
 
 function isMissingFileError(err: unknown): err is NodeJS.ErrnoException {

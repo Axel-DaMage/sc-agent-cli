@@ -5,6 +5,8 @@ import { parseJsonSafe } from '../parser-utils.js';
 
 export interface DevcontainerDetectionResult {
   detected: boolean;
+  /** Workspace-relative path to the config file when detected (e.g. `.devcontainer/devcontainer.json`). */
+  configFile?: string;
   devcontainer?: DevcontainerInfo;
   manifests: string[];
 }
@@ -37,6 +39,7 @@ export function detectDevcontainer(workspaceRoot: string): DevcontainerDetection
     : '.devcontainer.json';
 
   result.detected = true;
+  result.configFile = relConfigPath;
   result.manifests.push(relConfigPath);
 
   let rawJson: any = null;

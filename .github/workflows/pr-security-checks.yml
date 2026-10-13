@@ -13,6 +13,7 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout code
@@ -28,6 +29,7 @@ jobs:
   code-diff-analysis:
     name: Analyze Code Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -81,6 +83,7 @@ jobs:
   permission-changes:
     name: Check Permission Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -117,6 +120,7 @@ jobs:
   backdoor-detection:
     name: Backdoor Pattern Detection
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -171,6 +175,7 @@ jobs:
   data-exfiltration-check:
     name: Data Exfiltration Prevention
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

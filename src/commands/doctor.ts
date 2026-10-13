@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import chalk from 'chalk';
 import { loadConfig, getGlobalConfigPath } from '../core/config.js';
 import type { ProjectConfig } from '../core/types.js';
+import { detectSandboxBackend } from '../utils/sandbox.js';
 
 interface DoctorOptions {
   profile?: string;
@@ -263,6 +264,34 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
         });
       }
     }
+  }
+
+  // 7. Sandbox backend probe (#423) — only when sandbox.enabled.
+  if (config?.sandbox?.enabled) {
+    const backend = detectSandboxBackend();
+    if (backend.mode === 'bwrap') {
+      results.push({
+        name: 'sandbox backend',
+        status: 'PASS',
+        detail: `bubblewrap boundary available (${backend.bwrapPath})` +
+          (config.sandbox.seccomp ? '; seccomp requested' : ''),
+      });
+    } else {
+      results.push({
+        name: 'sandbox backend',
+        status: 'WARN',
+        detail: `degraded to egress-proxy-only mode — ${backend.degradedReason}`,
+        fix: 'Install bubblewrap (bwrap) on Linux for the filesystem/seccomp boundary.',
+      });
+    }
+    const egress = config.sandbox.egressAllowlist ?? [];
+    results.push({
+      name: 'sandbox egress',
+      status: 'PASS',
+      detail: egress.length === 0
+        ? 'egressAllowlist empty → all non-loopback egress blocked'
+        : `allowlist: ${egress.join(', ')}`,
+    });
   }
 
   // Report
