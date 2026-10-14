@@ -105,10 +105,10 @@ alias scc
 
 ```bash
 node --version
-# Expected: v18.x.x or higher
+# Expected: v20.x.x or higher
 ```
 
-✅ Pass if v18+  
+✅ Pass if v20+  
 ❌ Fail if not installed → Install Node.js in WSL
 
 ## Interactive Test (Both Environments)

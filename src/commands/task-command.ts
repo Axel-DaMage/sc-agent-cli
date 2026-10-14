@@ -2,7 +2,6 @@ import chalk from 'chalk';
 import { writeFile, access, mkdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
-import { format } from 'node:util';
 
 interface TaskTemplate {
   name: string;

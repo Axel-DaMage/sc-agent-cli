@@ -28,7 +28,7 @@ Use Claude Code if you want a complete product. Use SC-Agent CLI if you want con
 
 ### What Node version do I need?
 
-Node.js >= 18.0.0 (for native `fetch` support).
+Node.js >= 20.0.0. CI tests the suite on Node 20, 22, 24, and 26 (`engines` in `package.json` sets the floor).
 
 Check with:
 
@@ -50,7 +50,7 @@ sc-agent              # Works offline
 ### Where are my config files stored?
 
 - **Global config**: `~/.sc-agent/config.json`
-- **Project config**: `.sc-agent.json` (in project root)
+- **Project config**: `.sc-agent.json` (in project root) — restricted scope: it may add deny rules (`denyPaths`/`denyCommands` merge additively) and tighten the sandbox, but cannot set `mcp.servers`, `plugins`, `settings.formatters`, `model.baseUrl`/`apiKey`, `permissions.autoApprove`, or weaken an enabled sandbox (#469)
 
 ### How do I reset my configuration?
 
@@ -92,6 +92,12 @@ Edit `denyPaths` in your config:
   }
 }
 ```
+
+Note that `denyPaths` guards the **file tools** only — it does not constrain
+`run_shell`. Shell-side protection comes from the scrubbed child environment
+(credentials are never forwarded), shipped `denyCommands` defaults that block
+`cat .env`-style reads, and secret-value masking on tool output. See
+[permission-profiles.md](permission-profiles.md#hard-deny-list-denycommands).
 
 ### Can I use this in a CI/CD pipeline?
 

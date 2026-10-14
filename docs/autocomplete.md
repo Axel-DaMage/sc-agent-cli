@@ -395,7 +395,7 @@ You: /mnt/c/[Tab] → Works
 **Problem:** Pressing Tab has no effect
 
 **Solution:**
-1. Make sure you're using Node.js 18+
+1. Make sure you're using Node.js 20+
 2. Check that you're in an interactive terminal (not piped)
 3. Try pressing Tab twice quickly
 

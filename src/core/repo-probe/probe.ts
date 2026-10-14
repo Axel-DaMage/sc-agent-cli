@@ -19,7 +19,7 @@ import { mineCiWorkflows } from './detectors/ci-mining.js';
 import { detectUnknownEcosystem } from './detectors/fallback.js';
 import { getCachedProfile, saveCachedProfile } from './cache.js';
 
-export const REPO_PROBE_VERSION = '1.0.0';
+export const REPO_PROBE_VERSION = '1.1.0';
 
 /**
  * Probe a repository workspace to auto-detect its toolchains, package managers,
@@ -207,7 +207,9 @@ export async function probeRepo(
     frameworks: deduplicateFrameworks(frameworksList),
     commands,
     ci: ciRes.ci,
-    devcontainer: devcontainerRes.devcontainer,
+    devcontainer: devcontainerRes.detected,
+    devcontainerPath: devcontainerRes.configFile,
+    devcontainerInfo: devcontainerRes.devcontainer,
     manifests: Array.from(manifestsSet),
     rawFindings,
     notes: notes.length > 0 ? notes : undefined,

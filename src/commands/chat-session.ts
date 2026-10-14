@@ -4,18 +4,17 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('../../package.json') as { version: string };
-import { stdin as input, stdout as output } from 'node:process';
+import { stdin as input } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { Agent } from '../core/agent.js';
 import type { AgentOptions } from '../core/agent.js';
 import type { Message } from '../core/types.js';
-import { loadConfig } from '../core/config.js';
+import { loadConfig, getGlobalConfigPath } from '../core/config.js';
 import { clearSessionPermissions } from '../utils/permissions.js';
 import { checkStorageLimit, enforceStorageLimit, formatBytes } from '../utils/storage-limit.js';
-import { estimateCost } from '../utils/token-tracker.js';
 import { getModelProfileEmptyStateGuidance } from './chat-session-guidance.js';
 import { getStorageGuidance } from '../utils/storage-guidance.js';
 import { statusBar, getShortcutsBar } from '../utils/status-bar.js';
@@ -25,6 +24,15 @@ import { boxHeader, boxFooter } from '../utils/box-drawing.js';
 import { showConfig } from '../utils/config-display.js';
 import { resolveSettings } from '../utils/settings.js';
 import { verbose, verboseSession, verboseError } from '../utils/verbose-logger.js';
+import { getWorkspaceGitState, detectSessionMutations, countMutatingToolCalls } from '../utils/mutation-detector.js';
+import { ensureSecureDirSync, writeFileSecureSync } from '../utils/secure-fs.js';
+import { buildRunManifest, emitRunManifest, type RunExitReason } from '../utils/run-manifest.js';
+import { detectSessionResolution } from '../utils/resolution-detector.js';
+import { EXIT_CODES } from '../utils/exit-codes.js';
+import { redactDeep, registerConfigSecrets } from '../utils/secret-redaction.js';
+import { writeSessionTrace, writeSessionStatus } from '../utils/session-trace.js';
+import { resolveRolePipeline, resolveMaxRoleFixes, runRolePipeline } from '../core/roles.js';
+import type { ReviewerDecision } from '../core/roles.js';
 
 // Multi-line input handler: Enter=submit, Shift+Enter=newline, paste inserts verbatim
 function readUserInput(history: string[], workspaceRoot: string): Promise<string> {
@@ -391,8 +399,11 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   export async function startChatSession(options: AgentOptions): Promise<void> {
   let agent = new Agent(options);
   let history: Message[] = [];
-  let historyCheckpoints: Message[][] = [];
+  const historyCheckpoints: Message[][] = [];
   let currentConfig = options.config;
+  // #472: session persistence helpers below run before/without the agent —
+  // register the run's credentials up front for exact-match masking.
+  registerConfigSecrets(currentConfig);
   let inputHistory: string[] = [];
   let currentPermissionMode: 'ask_once' | 'always_ask' | 'unlimited' = options.permissionMode || (options.autoApprove ? 'unlimited' : 'ask_once');
     const settings = resolveSettings(currentConfig);
@@ -430,54 +441,35 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
   verbose(`Profile: ${currentConfig.activeProfile || 'default'} (${currentConfig.model.model})`);
   verbose(`Mode: ${options.initialPrompt ? 'batch' : 'interactive'}, Permissions: ${currentPermissionMode}`);
 
-  // Helper to persist session trace to the unique instance directory
+  // Helper to persist session trace to the unique instance directory.
+  // Write path lives in utils/session-trace.ts — every message crosses the
+  // shared redaction layer (#472) before hitting disk.
   function saveSessionTrace(msgs: Message[]) {
-    try {
-      const sessionDir = join(homedir(), '.sc-agent', 'sessions', sessionId);
-      if (!existsSync(sessionDir)) {
-        mkdirSync(sessionDir, { recursive: true });
-      }
-      writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(msgs, null, 2));
-    } catch {
-      // Silent: logging is best-effort
-    }
-  }
+    writeSessionTrace(sessionId, msgs);  }
 
-  // Tools that mutate the workspace. A run that never calls one of these
-  // produced zero filesystem changes (pure read/plan/refusal).
-  const MUTATING_TOOLS = ['write_file', 'edit_file', 'git'];
+  // Mutation detection is delegated to mutation-detector.ts: per-tool-call
+  // classification (incl. run_shell command analysis) plus a post-run git
+  // worktree diff that catches writes made through unclassified paths.
 
   // Helper to write machine-readable status for automation
   function saveSessionStatus(status: string, error?: string, historyMsgs?: Message[]) {
-    try {
-      const sessionDir = join(homedir(), '.sc-agent', 'sessions', sessionId);
-      if (!existsSync(sessionDir)) {
-        mkdirSync(sessionDir, { recursive: true });
-      }
-      const hasChanges = historyMsgs?.some(m =>
-        m.role === 'assistant' &&
-        m.tool_calls?.some(tc => MUTATING_TOOLS.includes(tc.function.name))
-      ) ?? false;
-      const statusData: Record<string, unknown> = {
-        status,
-        timestamp: new Date().toISOString(),
-        session_id: sessionId,
-        changes: hasChanges,
-        model: currentConfig.model.model,
-        provider: currentConfig.model.provider,
-      };
-      if (error) statusData.error = error;
-      writeFileSync(join(sessionDir, 'status.json'), JSON.stringify(statusData, null, 2));
-    } catch {
-      // Silent: best-effort
-    }
-  }
+    const hasChanges = historyMsgs ? countMutatingToolCalls(historyMsgs) > 0 : false;
+    const statusData: Record<string, unknown> = {
+      status,
+      timestamp: new Date().toISOString(),
+      session_id: sessionId,
+      changes: hasChanges,
+      model: currentConfig.model.model,
+      provider: currentConfig.model.provider,
+    };
+    if (error) statusData.error = error;
+    writeSessionStatus(sessionId, statusData);  }
 
   // Load persisted conversation + input history for this workspace
   try {
     if (options.clearHistory) {
       if (existsSync(historyPaths.conv)) {
-        writeFileSync(historyPaths.conv, JSON.stringify([], null, 2));
+        writeFileSecureSync(historyPaths.conv, JSON.stringify([], null, 2));
       }
       history = [];
     } else if (existsSync(historyPaths.conv)) {
@@ -621,7 +613,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
 
   // Auto-cleanup if over limit
   if (storageInfo.needsCleanup) {
-    enforceStorageLimit(configDir, true);
+    enforceStorageLimit(configDir, true, isQuiet);
   }
 
   // Show status bar at bottom (only in interactive mode)
@@ -629,8 +621,111 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     statusBar.show(getShortcutsBar());
   }
 
+  let batchStart = Date.now();
+
+  // #415/#399: machine-readable run manifest — emitted as the LAST stdout
+  // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
+  // With `--output-format json` it is the ONLY stdout write.
+  // Resolution detector inputs — hoisted to this scope so the shared
+  // emitUsageSummary closure (incl. signal-handler early exits) can read
+  // whatever the batch block has populated so far (#446).
+  let batchGitStateBefore: ReturnType<typeof getWorkspaceGitState> | null = null;
+  let agentError: Error | undefined;
+  let budgetExceeded: string | null | undefined;
+  // #462 reviewer/judge consensus state — populated by runRolePipeline in
+  // the batch block; read by emitUsageSummary for the manifest `review`
+  // block (including signal-handler early exits mid-loop).
+  const maxRoleFixes = resolveMaxRoleFixes();
+  let reviewDecision: ReviewerDecision | null = null;
+  let reviewFixRounds = 0;
+
+  // Engine-owned artifacts (--summary-file/--output-file/--audit-log) can be
+  // written inside the worktree. They are session artifacts, not real repo
+  // diffs — exclude them from the manifest's files_changed (#464).
+  const engineArtifactPaths = [options.summaryFile, options.outputFile, options.auditLog]
+    .filter((p): p is string => typeof p === 'string' && p.length > 0)
+    .map(p => resolve(options.workspaceRoot, p));
+
+  const detectResolutionSafely = (exitReason: RunExitReason) => {
+    try {
+      return detectSessionResolution({
+        history,
+        exitReason,
+        agentError,
+        budgetExceeded,
+        beforeGitState: batchGitStateBefore,
+        afterGitState: getWorkspaceGitState(options.workspaceRoot),
+        workspaceRoot: options.workspaceRoot,
+        excludePaths: engineArtifactPaths,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+
+  const emitUsageSummary = (exitReason: RunExitReason, error?: string, onStdoutFlushed?: () => void) => {
+    const usage = agent.tokenTracker.getUsage();
+    const stats = agent.getStats();
+    const checkpointPath = join(homedir(), '.sc-agent', 'checkpoints', `${sessionId}.json`);
+    const manifest = buildRunManifest({
+      exitReason,
+      error,
+      version: packageVersion,
+      model: currentConfig.model.model,
+      sessionId,
+      history,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      // #424: the tracker prices each role at its serving model when the
+      // run used role routing; identical to estimateCost(model, ...) for
+      // single-phase runs.
+      costUsd: agent.tokenTracker.getEstimatedCost(),
+      toolCalls: agent.getToolCallCounts(),
+      toolRunCount: stats.toolRunCount,
+      // totalIterations covers the whole phase pipeline (#424); `iterations`
+      // alone would report only the last phase's count.
+      iterations: stats.totalIterations,
+      durationMs: Date.now() - batchStart,
+      checkpointPath: existsSync(checkpointPath) ? checkpointPath : null,
+      devcontainer: options.devcontainer,
+      provider: agent.providerUsed,
+      errorObj: agentError,
+      phases: agent.getPhases(),
+      roleFallbacks: agent.getRoleFallbacks(),
+      roleTokens: agent.tokenTracker.getRoleUsage(),
+      cachedTokens: agent.tokenTracker.getCachedTokens(),
+      review: reviewDecision
+        ? { verdict: reviewDecision.verdict, explicit: reviewDecision.explicit, fixRounds: reviewFixRounds, maxFixes: maxRoleFixes }
+        : undefined,
+      resolutionInfo: detectResolutionSafely(exitReason),
+      sandbox: agent.getSandboxInfo() ?? undefined,
+      sandboxViolations: agent.getSandboxViolations(),
+      contextBudget: agent.getContextBudget(),
+    });
+    emitRunManifest(manifest, {
+      files: [options.summaryFile, options.outputFile],
+      onStdoutFlushed,
+    });
+  };
+
+  // Batch runs must still emit the manifest when killed by a signal (#399):
+  // CI `timeout` sends SIGTERM, Ctrl+C sends SIGINT. stdout is flushed via
+  // the write callback before exiting so the JSON line survives on a pipe;
+  // the unref'd timer is a fallback if the callback never fires.
+  const exitOnSignal = (signal: 'SIGINT' | 'SIGTERM', code: number) => {
+    process.exitCode = code;
+    try {
+      emitUsageSummary('interrupted', `Interrupted by ${signal}`, () => process.exit(code));
+    } catch { /* stdout may already be gone — exit non-zero regardless */ }
+    setTimeout(() => process.exit(code), 250).unref();
+  };
+
   // Handle Ctrl+C gracefully
   process.on('SIGINT', () => {
+    if (isNonInteractive) {
+      exitOnSignal('SIGINT', 130);
+      return;
+    }
     if (!isQuiet) {
       statusBar.hide();
       console.log(chalk.gray('\n\n╔════════════════════════════════════════════════════════════╗'));
@@ -638,6 +733,14 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray('╚════════════════════════════════════════════════════════════╝\n'));
     }
     process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    if (isNonInteractive) {
+      exitOnSignal('SIGTERM', 143);
+      return;
+    }
+    process.exit(143);
   });
 
   // Non-interactive mode: process single prompt and exit
@@ -663,10 +766,42 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`\n${boxHeader('Assistant')}`));
     }
 
-    const batchStart = Date.now();
-    let agentError: Error | undefined;
+    // duration_ms measures the run itself — reset the clock just before it.
+    batchStart = Date.now();
+    // Snapshot git state before the agent runs — mutations made via run_shell
+    // or unclassified tools are caught by comparing status/HEAD afterwards.
+    batchGitStateBefore = getWorkspaceGitState(options.workspaceRoot);
+    // #424 multi-model orchestration: when `config.roles` is present (or
+    // --role/SC_ROLE pins a single phase) the headless run expands into the
+    // planner → executor → reviewer pipeline. Each phase runs on its
+    // configured provider/model; absent/invalid mappings fall back to the
+    // run's default model and surface as `role_fallback` in the manifest.
+    // Without role config the classic single-phase run is preserved.
+    // #462: runRolePipeline owns the consensus loop — a reviewer
+    // request_changes verdict feeds its comments back to the executor for
+    // rework (bounded by SC_ROLE_MAX_FIXES), then re-reviews; a
+    // same-provider+model reviewer warns once.
+    const rolePipeline = (options.role || currentConfig.roles)
+      ? resolveRolePipeline(currentConfig, options.role)
+      : null;
+
     try {
-      history = await agent.run(userInput, history);
+      if (rolePipeline) {
+        const result = await runRolePipeline(agent, rolePipeline, userInput, history, {
+          maxFixes: maxRoleFixes,
+          log: (line) => {
+            if (!isQuiet) console.log(chalk.gray(line));
+          },
+          // Warnings ride stderr: the stdout contract (transcript in text
+          // mode, manifest-only under --output-format json) stays intact.
+          warn: (line) => console.error(chalk.yellow(`  ${line}`)),
+        });
+        history = result.history;
+        reviewDecision = result.decision;
+        reviewFixRounds = result.fixRounds;
+      } else {
+        history = await agent.run(userInput, history);
+      }
     } catch (err: any) {
       agentError = err;
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -701,41 +836,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.gray(`  🆔 ${sessionId}\n`));
     }
 
-    // #415/#399: machine-readable run manifest — emitted as the LAST stdout
-    // write in batch mode so `sc chat -q ... | tail -1 | jq` stays parseable.
-    // With `--output-format json` it is the ONLY stdout write.
-    const emitUsageSummary = (exitReason: 'success' | 'error' | 'no_changes' | 'budget_exceeded') => {
-      const usage = agent.tokenTracker.getUsage();
-      const stats = agent.getStats();
-      const lastAssistant = [...history].reverse().find(
-        m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0
-      );
-      const checkpointPath = join(homedir(), '.sc-agent', 'checkpoints', `${sessionId}.json`);
-      const summary = {
-        v: 1,
-        success: exitReason === 'success',
-        model: currentConfig.model.model,
-        tokens_in: usage.inputTokens,
-        tokens_out: usage.outputTokens,
-        estimated_cost_usd: estimateCost(currentConfig.model.model, usage.inputTokens, usage.outputTokens),
-        tool_calls: agent.getToolCallCounts(),
-        tool_calls_total: stats.toolRunCount,
-        iterations: stats.iterations,
-        duration_ms: Date.now() - batchStart,
-        exit_reason: exitReason,
-        final_message: lastAssistant ? String(lastAssistant.content).slice(0, 4000) : null,
-        checkpoint: existsSync(checkpointPath) ? checkpointPath : null,
-      };
-      for (const outPath of [options.summaryFile, options.outputFile]) {
-        if (!outPath) continue;
-        try {
-          writeFileSync(resolve(outPath), JSON.stringify(summary, null, 2));
-        } catch (e) {
-          verboseError(`manifest write failed (${outPath}): ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      console.log(JSON.stringify(summary));
-    };
+    // Status markers stay greppable, but under --output-format json they go
+    // to stderr so stdout carries the manifest only (#399).
+    const markerOut = options.outputFormat === 'json' ? console.error : console.log;
 
     // Save session trace (always, even on error)
     saveSessionTrace(history);
@@ -746,7 +849,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       const errorMsg = agentError instanceof Error ? agentError.message : String(agentError);
       saveSessionStatus('error', errorMsg, history);
       verboseError(`Agent run failed: ${errorMsg}`);
-      emitUsageSummary('error');
+      emitUsageSummary('error', errorMsg);
       throw agentError;
     }
 
@@ -768,34 +871,41 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       saveSessionStatus('no_changes', undefined, history);
       const noMeaningfulMsg = 'No meaningful response generated. The model may not support this prompt length or format.';
       verboseError(noMeaningfulMsg);
-      emitUsageSummary('no_changes');
+      emitUsageSummary('no_changes', noMeaningfulMsg);
       throw new Error(noMeaningfulMsg);
     }
 
     // Budget exhaustion: run stopped early but gracefully — emit a
     // machine-greppable marker + distinct exit code (22 per #409 sketch),
     // preserving the partial-work summary instead of a SIGKILL.
-    const budgetExceeded = agent.getStats().budgetExceeded;
+    budgetExceeded = agent.getStats().budgetExceeded;
     if (budgetExceeded) {
       saveSessionStatus('budget_exceeded', `budget:${budgetExceeded}`, history);
-      console.log(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
-      process.exitCode = 22;
-      emitUsageSummary('budget_exceeded');
+      markerOut(`SC_BUDGET_EXCEEDED ${budgetExceeded}`);
+      process.exitCode = EXIT_CODES.BUDGET_EXCEEDED;
+      emitUsageSummary('budget_exceeded', `budget exceeded (${budgetExceeded})`);
       return;
     }
 
     // Zero-mutation signal: run completed but never called a mutating tool
     // (model refused, answered read-only, or only ran inspections). Emit a
-    // machine-greppable marker as the last stdout line and exit with the
-    // documented no-changes code (10) — still a clean exit, caller decides.
-    const hasMutations = history.some(m =>
-      m.role === 'assistant' &&
-      m.tool_calls?.some(tc => MUTATING_TOOLS.includes(tc.function.name))
-    );
-    if (!hasMutations) {
+    // machine-greppable marker and exit with the documented code — 11 when
+    // the terminal resolution is not_actionable/blocked (#446 verdict,
+    // wired to the process exit in #486), 10 for the generic no-changes
+    // outcome. Both are clean exits; the caller decides.
+    const mutations = detectSessionMutations(history, batchGitStateBefore, getWorkspaceGitState(options.workspaceRoot));
+    if (!mutations.hasMutations) {
+      const resolution = detectResolutionSafely('no_changes');
+      if (resolution && (resolution.resolution === 'not_actionable' || resolution.resolution === 'blocked')) {
+        saveSessionStatus(resolution.resolution, resolution.resolution_reason, history);
+        markerOut(resolution.stdout_marker ?? `SCC_${resolution.resolution === 'blocked' ? 'BLOCKED' : 'NOT_ACTIONABLE'}`);
+        process.exitCode = EXIT_CODES.NOT_ACTIONABLE;
+        emitUsageSummary('no_changes');
+        return;
+      }
       saveSessionStatus('no_changes', undefined, history);
-      console.log('SCC_NO_CHANGES');
-      process.exitCode = 10;
+      markerOut('SCC_NO_CHANGES');
+      process.exitCode = EXIT_CODES.NO_CHANGES;
       emitUsageSummary('no_changes');
       return;
     }
@@ -858,6 +968,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       console.log(chalk.white('  /checkpoint                    ') + chalk.gray('- Save/list/resume execution checkpoints'));
       console.log(chalk.white('  /clear                         ') + chalk.gray('- Clear conversation history'));
       console.log(chalk.white('  /memory                        ') + chalk.gray('- View/manage persistent memory'));
+      console.log(chalk.white('  /remember [--global] <text>    ') + chalk.gray('- Save a quick memory (workspace or global scope)'));
       console.log(chalk.white('  /config                        ') + chalk.gray('- Show full configuration details'));
       console.log(chalk.white('  /probe                         ') + chalk.gray('- Auto-detect repo toolchain, package manager, and commands'));
       console.log(chalk.white('  /hud                           ') + chalk.gray('- Toggle compact status bar'));
@@ -898,9 +1009,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       // Persist restored history + input history
       try {
         const dir = dirname(historyPaths.conv);
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-        writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+        ensureSecureDirSync(dir);
+        writeFileSecureSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+        writeFileSecureSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
         saveSessionTrace(history);
       } catch {
         console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist history to disk\n'));
@@ -926,9 +1037,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       // Persist restored history + input history
       try {
         const dir = dirname(historyPaths.conv);
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-        writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+        ensureSecureDirSync(dir);
+        writeFileSecureSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+        writeFileSecureSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
         saveSessionTrace(history);
       } catch {
         console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist history to disk\n'));
@@ -945,7 +1056,6 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       if (sessionSub === 'export') {
         const exportPath = sessionArgs[2] || join(process.cwd(), `session-${Date.now()}.json`);
         try {
-          const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
           const exportDir = dirname(exportPath);
           if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
           const payload = {
@@ -955,10 +1065,10 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
             model: currentConfig.model.model,
             provider: currentConfig.model.baseUrl,
             profile: currentConfig.activeProfile || 'default',
-            history,
-            inputHistory,
+            history: redactDeep(history),
+            inputHistory: redactDeep(inputHistory),
           };
-          writeFileSync(exportPath, JSON.stringify(payload, null, 2));
+          writeFileSecureSync(exportPath, JSON.stringify(payload, null, 2));
           console.log(chalk.green(`\n✓ Session exported to ${exportPath} (${history.length} messages)\n`));
         } catch (err: unknown) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -987,9 +1097,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           // Persist imported history
           try {
             const dir = dirname(historyPaths.conv);
-            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-            writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-            writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+            ensureSecureDirSync(dir);
+            writeFileSecureSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+            writeFileSecureSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
             saveSessionTrace(history);
           } catch {
             console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist history to disk\n'));
@@ -1035,7 +1145,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       if (cpSub === 'save') {
         try {
           const { saveCheckpoint } = await import('../utils/checkpoint.js');
-          const path = saveCheckpoint({
+          saveCheckpoint({
             sessionId,
             workspaceRoot: options.workspaceRoot,
             history,
@@ -1114,17 +1224,14 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         });
         if (sel.fields && sel.fields.length > 0) {
           hudFields = sel.fields;
-          const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const { homedir } = await import('node:os');
-          const configPath = join(homedir(), '.sc-agent', 'config.json');
-          const configDir = join(homedir(), '.sc-agent');
-          if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+          const configPath = getGlobalConfigPath();
+          const configDir = dirname(configPath);
+          ensureSecureDirSync(configDir);
           let cfg: Record<string, unknown> = {};
           if (existsSync(configPath)) cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
           if (!cfg.settings) cfg.settings = {};
           (cfg.settings as Record<string, unknown>).hudFields = hudFields;
-          writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+          writeFileSecureSync(configPath, JSON.stringify(cfg, null, 2));
           console.log(chalk.green(`\n✓ HUD fields: ${hudFields.join(', ')}\n`));
         } else {
           console.log(chalk.gray('\n  Fields unchanged\n'));
@@ -1139,17 +1246,14 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       } else {
         // Toggle on/off
         hudEnabled = !hudEnabled;
-        const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-        const { join } = await import('node:path');
-        const { homedir } = await import('node:os');
-        const configPath = join(homedir(), '.sc-agent', 'config.json');
-        const configDir = join(homedir(), '.sc-agent');
-        if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+        const configPath = getGlobalConfigPath();
+        const configDir = dirname(configPath);
+        ensureSecureDirSync(configDir);
         let cfg: Record<string, unknown> = {};
         if (existsSync(configPath)) cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
         if (!cfg.settings) cfg.settings = {};
         (cfg.settings as Record<string, unknown>).hud = hudEnabled;
-        writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+        writeFileSecureSync(configPath, JSON.stringify(cfg, null, 2));
 
         if (hudEnabled) {
           console.log(chalk.cyan('\n📊 HUD enabled'));
@@ -1196,7 +1300,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         console.log(chalk.gray(`  ${options.workspaceRoot}`));
 
         console.log(chalk.gray('\n🌐 Config'));
-        console.log(chalk.gray(`  ~/.sc-agent/config.json`));
+        console.log(chalk.gray(`  ${getGlobalConfigPath()}`));
         console.log(chalk.gray(`  Active profile: ${currentConfig.activeProfile || 'none'}`));
         console.log(chalk.gray(`  Model: ${currentConfig.model.model}`));
         console.log();
@@ -1235,38 +1339,84 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         const subcommand = args[1]?.toLowerCase();
 
         if (subcommand === 'clear') {
-          await persistentMemory.clear();
-          console.log(chalk.green('\n✓ All persistent memories cleared\n'));
+          await persistentMemory.clear(options.workspaceRoot);
+          console.log(chalk.green('\n✓ All persistent memories cleared (workspace, global, and legacy)\n'));
         } else if (subcommand === 'forget' && args[2]) {
           const key = args.slice(2).join(' ');
-          const removed = await persistentMemory.forget(key);
+          const removed = await persistentMemory.forget(key, options.workspaceRoot);
           if (removed) {
             console.log(chalk.green(`\n✓ Forgotten memory: "${key}"\n`));
           } else {
             console.log(chalk.yellow(`\n⚠ No memory found with key: "${key}"\n`));
           }
+        } else if (subcommand === 'move') {
+          // /memory move <key> --to workspace|global — re-file between scopes (#476)
+          const toIdx = args.findIndex(a => a === '--to');
+          const target = toIdx >= 0 ? args[toIdx + 1]?.toLowerCase() : undefined;
+          const key = (toIdx >= 0 ? args.slice(2, toIdx) : args.slice(2)).join(' ');
+          if (!key || (target !== 'workspace' && target !== 'global')) {
+            console.log(chalk.yellow('\n⚠ Usage: /memory move <key> --to workspace|global\n'));
+          } else {
+            const moved = await persistentMemory.move(key, target, options.workspaceRoot);
+            console.log(chalk.green(`\n✓ Moved memory "${moved.key}" → ${moved.scope} scope\n`));
+          }
+        } else if (subcommand === 'show' && (args[2]?.toLowerCase() === '--all' || args[2]?.toLowerCase() === '-a')) {
+          // Include quarantined legacy entries (pre-scoping memories) (#476)
+          const summary = await persistentMemory.getSummary(options.workspaceRoot, { all: true });
+          console.log(chalk.cyan(`\n${summary}\n`));
         } else if (subcommand === 'show' && args[2]) {
           const key = args.slice(2).join(' ');
-          const content = await persistentMemory.recall(key);
-          if (content) {
-            console.log(chalk.cyan(`\n📝 Memory: ${key}\n`));
-            console.log(chalk.gray(content));
+          const entry = await persistentMemory.recallEntry(key, options.workspaceRoot);
+          if (entry) {
+            console.log(chalk.cyan(`\n📝 Memory: ${entry.key} [${entry.scope}]\n`));
+            console.log(chalk.gray(entry.content));
             console.log();
           } else {
             console.log(chalk.yellow(`\n⚠ No memory found with key: "${key}"\n`));
           }
         } else {
-          // Show summary
-          const summary = await persistentMemory.getSummary();
+          // Show summary (workspace + global tiers; legacy stays hidden)
+          const summary = await persistentMemory.getSummary(options.workspaceRoot);
           console.log(chalk.cyan(`\n${summary}\n`));
 
           if (summary !== 'No stored memories.') {
             console.log(chalk.gray('Commands:'));
-            console.log(chalk.gray('  /memory show <key>   - View a specific memory'));
-            console.log(chalk.gray('  /memory forget <key> - Remove a memory'));
-            console.log(chalk.gray('  /memory clear        - Remove all memories'));
+            console.log(chalk.gray('  /memory show <key>                      - View a specific memory'));
+            console.log(chalk.gray('  /memory show --all                      - Include legacy (pre-scoping) memories'));
+            console.log(chalk.gray('  /memory move <key> --to workspace|global - Re-file a memory between scopes'));
+            console.log(chalk.gray('  /memory forget <key>                    - Remove a memory'));
+            console.log(chalk.gray('  /memory clear                           - Remove all memories'));
+            console.log(chalk.gray('  /remember [--global] <text>             - Save a quick memory'));
             console.log();
           }
+        }
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.red(`\n✗ Error: ${errorMsg}\n`));
+      }
+      continue;
+    }
+
+    // Handle /remember command — quick save to persistent memory (#476).
+    // `/remember <text>` stores in the workspace tier; `--global` opts in to
+    // the cross-workspace tier.
+    if (userInput.toLowerCase().startsWith('/remember')) {
+      try {
+        const tokens = userInput.trim().slice('/remember'.length).trim().split(/\s+/).filter(Boolean);
+        const globalIdx = tokens.findIndex(t => t === '--global' || t === '-g');
+        const scope = globalIdx >= 0 ? 'global' : 'workspace';
+        if (globalIdx >= 0) tokens.splice(globalIdx, 1);
+        const text = tokens.join(' ');
+        if (!text) {
+          console.log(chalk.yellow('\n⚠ Usage: /remember [--global] <text>\n'));
+        } else {
+          const base = `note-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+          let key = base;
+          for (let n = 2; await persistentMemory.recallEntry(key, options.workspaceRoot); n++) {
+            key = `${base}-${n}`;
+          }
+          await persistentMemory.remember(key, text, [], { scope, workspaceRoot: options.workspaceRoot });
+          console.log(chalk.green(`\n✓ Saved to ${scope} memory: "${key}"\n`));
         }
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1415,20 +1565,14 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
 
         // Save to config
         try {
-          const fs = await import('node:fs');
-          const path = await import('node:path');
-          const { homedir } = await import('node:os');
+          const configPath = getGlobalConfigPath();
+          const configDir = dirname(configPath);
 
-          const configPath = path.join(homedir(), '.sc-agent', 'config.json');
-          const configDir = path.dirname(configPath);
-
-          if (!fs.existsSync(configDir)) {
-            fs.mkdirSync(configDir, { recursive: true });
-          }
+          ensureSecureDirSync(configDir);
 
           let config: Record<string, unknown> = {};
-          if (fs.existsSync(configPath)) {
-            const configContent = fs.readFileSync(configPath, 'utf-8');
+          if (existsSync(configPath)) {
+            const configContent = readFileSync(configPath, 'utf-8');
             config = JSON.parse(configContent);
           }
 
@@ -1437,7 +1581,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
           }
           (config.permissions as {profile?: string}).profile = profileChoice.profile;
 
-          fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+          writeFileSecureSync(configPath, JSON.stringify(config, null, 2));
 
           // Update current config
           if (!currentConfig.permissions) {
@@ -1568,22 +1712,16 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         if (confirm.value) {
           // Save to config
           try {
-            const fs = await import('node:fs');
-            const path = await import('node:path');
-            const { homedir } = await import('node:os');
-
-            const configPath = path.join(homedir(), '.sc-agent', 'config.json');
+            const configPath = getGlobalConfigPath();
 
             // Ensure directory exists
-            const configDir = path.dirname(configPath);
-            if (!fs.existsSync(configDir)) {
-              fs.mkdirSync(configDir, { recursive: true });
-            }
+            const configDir = dirname(configPath);
+            ensureSecureDirSync(configDir);
 
             // Read existing config or create new
             let config: Record<string, unknown> = {};
-            if (fs.existsSync(configPath)) {
-              const configContent = fs.readFileSync(configPath, 'utf-8');
+            if (existsSync(configPath)) {
+              const configContent = readFileSync(configPath, 'utf-8');
               config = JSON.parse(configContent);
             }
 
@@ -1594,13 +1732,13 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
             (config.permissions as {autoApprove?: string[]}).autoApprove = preApprovedTools;
 
             // Write config
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            writeFileSecureSync(configPath, JSON.stringify(config, null, 2));
 
             console.log(chalk.green('\n✓ Configuration saved to:'));
             console.log(chalk.gray(`  ${configPath}\n`));
 
             // Reload config
-            const reloadedConfig = await loadConfig(options.workspaceRoot);
+            const reloadedConfig = await loadConfig(options.workspaceRoot, { auditLog: options.auditLog });
             currentConfig = reloadedConfig;
 
             agent = new Agent({
@@ -1677,7 +1815,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
         console.log(chalk.cyan('\n♻️  Reloading configuration...\n'));
 
         // Reload config from disk
-        const reloadedConfig = await loadConfig(options.workspaceRoot);
+        const reloadedConfig = await loadConfig(options.workspaceRoot, { auditLog: options.auditLog });
         currentConfig = reloadedConfig;
 
         // Override with env var if available
@@ -1735,7 +1873,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
     // Handle /model command
     if (userInput.toLowerCase() === '/model') {
       try {
-        const config = await loadConfig(options.workspaceRoot);
+        const config = await loadConfig(options.workspaceRoot, { auditLog: options.auditLog });
         const profiles = config.profiles || {};
         const profileNames = Object.keys(profiles);
 
@@ -1806,16 +1944,13 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
 
         if (saveDefault.value) {
           try {
-            const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-            const { join } = await import('node:path');
-            const { homedir } = await import('node:os');
-            const configPath = join(homedir(), '.sc-agent', 'config.json');
-            const configDir = join(homedir(), '.sc-agent');
-            if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+            const configPath = getGlobalConfigPath();
+            const configDir = dirname(configPath);
+            ensureSecureDirSync(configDir);
             let cfg: Record<string, unknown> = {};
             if (existsSync(configPath)) cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
             cfg.activeProfile = selection.profile;
-            writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+            writeFileSecureSync(configPath, JSON.stringify(cfg, null, 2));
             console.log(chalk.gray(`  ✓ Saved "${selection.profile}" as default\n`));
           } catch {
             console.log(chalk.gray(`  ⚠️  Could not save to config\n`));
@@ -1841,9 +1976,9 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
       // Persist conversation + input history for cross-session/workspace continuity
       try {
         const dir = dirname(historyPaths.conv);
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(historyPaths.conv, JSON.stringify(history, null, 2));
-        writeFileSync(historyPaths.input, JSON.stringify(inputHistory, null, 2));
+        ensureSecureDirSync(dir);
+        writeFileSecureSync(historyPaths.conv, JSON.stringify(redactDeep(history), null, 2));
+        writeFileSecureSync(historyPaths.input, JSON.stringify(redactDeep(inputHistory), null, 2));
         saveSessionTrace(history);
       } catch {
         console.log(chalk.yellow('\n  ⚠️  Warning: Could not persist conversation history\n'));
@@ -1854,7 +1989,7 @@ function readUserInput(history: string[], workspaceRoot: string): Promise<string
 
       // HUD: compact status line with configurable fields
       if (hudEnabled && !isQuiet) {
-        const mem = await persistentMemory.getAll();
+        const mem = await persistentMemory.getAll({ workspaceRoot: options.workspaceRoot });
         const storage = checkStorageLimit(join(homedir(), '.sc-agent'));
         const permIcon = currentPermissionMode === 'unlimited' ? '∞' : currentPermissionMode === 'always_ask' ? '🔔' : '✓';
         const profileIcon = currentConfig.permissions?.profile === 'blacklist' ? '🛡️' : '🔒';
